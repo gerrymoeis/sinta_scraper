@@ -36,8 +36,14 @@ func main() {
 	filterData := flag.String("filter", "", "override raw POST filter (menimpa -rank)")
 	extraQuery := flag.String("query", "", "query string GET alternatif dari address bar (mis. sinta=6)")
 	maxPages := flag.Int("max-pages", 0, "batas halaman SINTA (0 = auto-detect)")
+	noDelay := flag.Bool("no-delay", false, "matikan jeda etika global (paksa min-delay=max-delay=0s) — HANYA untuk eksperimen/load-test terkontrol; risiko throttling/blokir ditanggung pengguna")
+	refresh := flag.Bool("refresh", false, "abaikan + wipe checkpoint: semua halaman discrape ulang, perubahan data terdeteksi & dicatat (doc 16)")
 
 	flag.Parse()
+	if *noDelay {
+		*minDelay = 0
+		*maxDelay = 0
+	}
 	start := time.Now()
 	runID := start.Format("20060102_150405")
 	*logPath = strings.ReplaceAll(*logPath, "{run_id}", runID)
@@ -89,10 +95,17 @@ func main() {
 	log.Printf("   filterData= %q", *filterData)
 	log.Printf("   extraQuery= %q", *extraQuery)
 	log.Printf("   maxPages =   %d", *maxPages)
+	log.Printf("   refresh  =   %v", *refresh)
+	if *noDelay {
+		log.Print("[PERINGATAN] -no-delay AKTIF — jeda etika global DIMATIKAN (0s) untuk semua request.")
+		log.Print("[PERINGATAN] Murni untuk eksperimen/load-test terkontrol; risiko throttling/429/blokir server ditanggung pengguna (doc 14).")
+	}
 
 	// ── Stage pipeline ────────────────────────────────────────────────
+	runKey := sinta.RunKeyFor(*filterData, *extraQuery, *rank)
 	var stageErr error
 	var sintaRes *sinta.StageResult
+	var stageDur time.Duration
 
 	if stagesInclude(*stages, "sinta") {
 		store, err := storage.Open(*dbPath)
@@ -110,20 +123,22 @@ func main() {
 		if err != nil {
 			log.Fatalf("GAGAL: %v", err)
 		}
-		runKey := sinta.RunKeyFor(*filterData, *extraQuery, *rank)
 		log.Printf("run-key = %s | filter POST = %q", runKey, formData)
+		stageStart := time.Now()
 
 		sintaRes, stageErr = sinta.RunSintaStage(sess, store, sinta.StageConfig{
 			BaseURL:    *baseURL,
 			FilterData: formData,
 			ExtraQuery: *extraQuery,
 			RunKey:     runKey,
+			Refresh:    *refresh,
 			MaxPages:   *maxPages,
 			Workers:    *workers,
 			MinDelay:   *minDelay,
 			MaxDelay:   *maxDelay,
 			Logf:       log.Printf,
 		})
+		stageDur = time.Since(stageStart)
 		if stageErr != nil {
 			log.Printf("stage sinta GAGAL: %v", stageErr)
 		}
@@ -150,6 +165,8 @@ func main() {
 			"min-delay":  minDelay.String(),
 			"max-delay":  maxDelay.String(),
 			"max-pages":  *maxPages,
+			"no-delay":   *noDelay,
+			"refresh":    *refresh,
 			"base-url":   *baseURL,
 			"user-agent": *userAgent,
 		},
@@ -174,6 +191,47 @@ func main() {
 		log.Fatalf("GAGAL: tulis file metrik: %v", err)
 	}
 	log.Printf("metrik ditulis: %s", metricsPath)
+
+	// ── Ringkasan akhir (spesifikasi doc 15 Bagian 2) ────────────────
+	durasi := time.Since(start)
+	log.Print("════════════════ [RINGKASAN] ═══════════════════════════════")
+	log.Printf("[RINGKASAN] run-id   : %s | run-key %s | %d workers", runID, runKey, *workers)
+	mode := "stage sinta tidak dijalankan"
+	if sintaRes != nil {
+		mode = "baru (fresh)"
+		switch {
+		case *refresh:
+			mode = "refresh (-refresh, checkpoint di-wipe)"
+		case sintaRes.PagesSkipped > 0:
+			mode = fmt.Sprintf("lanjutan (%d halaman checkpoint dilewati, bukan gagal)", sintaRes.PagesSkipped)
+		}
+	}
+	log.Printf("[RINGKASAN] mode     : %s", mode)
+	if stageDur > 0 {
+		log.Printf("[RINGKASAN] durasi   : %.1fs total | stage sinta %.1fs", durasi.Seconds(), stageDur.Seconds())
+	} else {
+		log.Printf("[RINGKASAN] durasi   : %.1fs total", durasi.Seconds())
+	}
+	if sintaRes != nil {
+		verif := "dilewati"
+		if sintaRes.Verified {
+			verif = "OK"
+		}
+		log.Printf("[RINGKASAN] halaman  : %d/%d tersimpan | %d dilewati | %d gagal",
+			sintaRes.PagesSaved, sintaRes.TotalPages, sintaRes.PagesSkipped, sintaRes.PagesFailed)
+		log.Printf("[RINGKASAN] jurnal   : %d diproses (baru %d | diperbarui %d | tidak berubah %d) | server umumkan %d | verifikasi %s",
+			sintaRes.JournalsSaved, sintaRes.JournalsNew, sintaRes.JournalsUpdated, sintaRes.JournalsUnchanged,
+			sintaRes.TotalRecords, verif)
+	} else {
+		log.Print("[RINGKASAN] stage sinta : tidak ada hasil (lihat error/GAGAL di atas)")
+	}
+	if st, ok := metrics.Default.Export()["sinta"]; ok && st.Requests > 0 {
+		log.Printf("[RINGKASAN] http     : %d request | %.2f MB | avg %.0fms p95 %.0fms",
+			st.Requests, float64(st.Bytes)/(1024*1024), st.Latency.Avg, st.Latency.P95)
+	}
+	log.Printf("[RINGKASAN] output   : %s", *dbPath)
+	log.Printf("[RINGKASAN] metrik   : %s", metricsPath)
+	log.Print("══════════════════════════════════════════════════════════════")
 
 	// ── Exit code jujur ───────────────────────────────────────────────
 	if stageErr != nil {

@@ -33,3 +33,25 @@ type FilterPageResult struct {
 	TotalPages    int
 	TotalJournals int
 }
+
+// FieldChange = satu perubahan field terdeteksi saat upsert (doc 16 Bagian 3.1).
+type FieldChange struct {
+	Field string // nama kolom db (snake_case)
+	Old   string
+	New   string
+}
+
+// JournalChange = kartu yang kontenya berubah pada satu upsert batch.
+type JournalChange struct {
+	ID     int
+	Name   string
+	Fields []FieldChange
+}
+
+// UpsertReport = hasil klasifikasi upsert: baru / diperbarui / tidak berubah.
+type UpsertReport struct {
+	New       int
+	Updated   int
+	Unchanged int
+	Changes   []JournalChange // hanya diisi untuk yang Updated
+}

@@ -20,11 +20,22 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{journals: map[int]Journal{}, checklist: map[string]map[int]bool{}}
 }
 
-func (f *fakeStore) UpsertJournals(js []Journal) error {
+func (f *fakeStore) UpsertJournals(js []Journal) (UpsertReport, error) {
+	var rep UpsertReport
 	for _, j := range js {
+		old, ok := f.journals[j.ID]
+		switch {
+		case !ok:
+			rep.New++
+		case old == j:
+			rep.Unchanged++
+		default:
+			rep.Updated++
+			rep.Changes = append(rep.Changes, JournalChange{ID: j.ID, Name: j.Name})
+		}
 		f.journals[j.ID] = j
 	}
-	return nil
+	return rep, nil
 }
 
 func (f *fakeStore) MarkPageCompleted(runKey string, page int) error {
@@ -32,6 +43,11 @@ func (f *fakeStore) MarkPageCompleted(runKey string, page int) error {
 		f.checklist[runKey] = map[int]bool{}
 	}
 	f.checklist[runKey][page] = true
+	return nil
+}
+
+func (f *fakeStore) ClearCheckpoint(runKey string) error {
+	delete(f.checklist, runKey)
 	return nil
 }
 
@@ -294,6 +310,16 @@ func TestRunSintaStageParalel(t *testing.T) {
 	if !res.Verified {
 		t.Errorf("Verified=false, VerifyMsg=%q", res.VerifyMsg)
 	}
+	// Invariant (doc 16 Bagian 5): tidak ada kartu yang hilang/dobel antara
+	// hitungan panjang slice (JournalsSaved) dan klasifikasi storage.
+	if res.JournalsNew+res.JournalsUpdated+res.JournalsUnchanged != res.JournalsSaved {
+		t.Errorf("invariant jurnal: %d+%d+%d != %d",
+			res.JournalsNew, res.JournalsUpdated, res.JournalsUnchanged, res.JournalsSaved)
+	}
+	if res.JournalsNew+res.JournalsUpdated+res.JournalsUnchanged != res.JournalsSaved {
+		t.Errorf("invariant jurnal: %d+%d+%d != %d",
+			res.JournalsNew, res.JournalsUpdated, res.JournalsUnchanged, res.JournalsSaved)
+	}
 	if len(store.journals) != 40 {
 		t.Errorf("jurnal unik = %d, want 40", len(store.journals))
 	}
@@ -301,6 +327,49 @@ func TestRunSintaStageParalel(t *testing.T) {
 		if !store.checklist["rank-1"][p] {
 			t.Errorf("checkpoint halaman %d belum tercentang", p)
 		}
+	}
+}
+
+// TestRunSintaStageRefresh memastikan -refresh: checkpoint di-wipe → semua
+// halaman discrape ulang, kartu identik terklasifikasi tidak berubah (doc 16).
+func TestRunSintaStageRefresh(t *testing.T) {
+	srv, posts, gets := serveListing(t)
+	store := newFakeStore()
+	form, _ := BuildFilterForm("1")
+	cfg := StageConfig{BaseURL: srv.URL, FilterData: form, RunKey: "rank-1", Logf: t.Logf}
+
+	if _, err := RunSintaStage(newTestSession(t), store, cfg); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	*posts, *gets = 0, 0
+
+	cfg.Refresh = true
+	res2, err := RunSintaStage(newTestSession(t), store, cfg)
+	if err != nil {
+		t.Fatalf("run 2 (-refresh): %v", err)
+	}
+	if res2.PagesSkipped != 0 {
+		t.Errorf("refresh: skipped=%d, want 0 (checkpoint di-wipe)", res2.PagesSkipped)
+	}
+	if res2.PagesSaved != 2 || res2.JournalsSaved != 20 {
+		t.Errorf("refresh: saved=%d halaman/%d jurnal, want 2/20", res2.PagesSaved, res2.JournalsSaved)
+	}
+	if res2.JournalsNew != 0 || res2.JournalsUpdated != 0 || res2.JournalsUnchanged != 20 {
+		t.Errorf("refresh: baru=%d diperbarui=%d tidak-berubah=%d, want 0/0/20",
+			res2.JournalsNew, res2.JournalsUpdated, res2.JournalsUnchanged)
+	}
+	if res2.JournalsNew+res2.JournalsUpdated+res2.JournalsUnchanged != res2.JournalsSaved {
+		t.Errorf("invariant jurnal: %d != %d",
+			res2.JournalsNew+res2.JournalsUpdated+res2.JournalsUnchanged, res2.JournalsSaved)
+	}
+	if *gets != 2 {
+		t.Errorf("refresh: GET=%d, want 2 (semua halaman discrape ulang)", *gets)
+	}
+	if *posts != 1 {
+		t.Errorf("refresh: POST=%d, want 1", *posts)
+	}
+	if !res2.Verified {
+		t.Errorf("refresh: Verified=false, VerifyMsg=%q", res2.VerifyMsg)
 	}
 }
 

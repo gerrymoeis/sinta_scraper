@@ -15,9 +15,10 @@ import (
 // memenuhi secara struktural — dicek compiler saat dipassing dari main.
 // Pakai interface supaya pipeline bisa diuji offline dengan fake in-memory.
 type JournalStore interface {
-	UpsertJournals(journals []Journal) error
+	UpsertJournals(journals []Journal) (UpsertReport, error)
 	MarkPageCompleted(runKey string, page int) error
 	CompletedPages(runKey string) (map[int]bool, error)
+	ClearCheckpoint(runKey string) error
 }
 
 type StageConfig struct {
@@ -25,6 +26,7 @@ type StageConfig struct {
 	FilterData string        // hasil final: -filter | BuildFilterForm(-rank) | "" (mode query/all)
 	ExtraQuery string        // -query, di-merge ke URL tiap halaman
 	RunKey     string        // namespace checkpoint (RunKeyFor)
+	Refresh    bool          // -refresh: wipe checkpoint dulu, semua halaman discrape ulang (doc 16)
 	MaxPages   int           // 0 = semua halaman (auto-detect)
 	MinDelay   time.Duration // hanya untuk estimasi durasi di log
 	MaxDelay   time.Duration
@@ -33,14 +35,17 @@ type StageConfig struct {
 }
 
 type StageResult struct {
-	TotalPages    int // dari server (auto-detect)
-	TotalRecords  int // dari server (auto-detect)
-	PagesSaved    int // halaman yang di-upsert run ini
-	PagesSkipped  int // dilewati karena checkpoint
-	PagesFailed   int // fetch gagal setelah retry → rerun akan mengulangnya
-	JournalsSaved int // Σ kartu halaman yang di-upsert run ini
-	Verified      bool
-	VerifyMsg     string // selalu terisi — alasan verifikasi OK/dilewati/gagal
+	TotalPages        int // dari server (auto-detect)
+	TotalRecords      int // dari server (auto-detect)
+	PagesSaved        int // halaman yang di-upsert run ini
+	PagesSkipped      int // dilewati karena checkpoint
+	PagesFailed       int // fetch gagal setelah retry → rerun akan mengulangnya
+	JournalsSaved     int // Σ kartu halaman yang DIPROSES run ini (= New+Updated+Unchanged)
+	JournalsNew       int // belum ada di db → INSERT
+	JournalsUpdated   int // konten beda → ditimpa + field-nya dicatat di log [ubah]
+	JournalsUnchanged int // konten identik → hanya sentuh last_scraped_at (tanpa tulis ulang)
+	Verified          bool
+	VerifyMsg         string // selalu terisi — alasan verifikasi OK/dilewati/gagal
 }
 
 // pageResult = outcome satu halaman dari worker → koordinator (single writer).
@@ -91,7 +96,13 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 	logf("[stage sinta] auto-detect: %d halaman | %d total record | target %d halaman | estimasi ~%v",
 		first.TotalPages, first.TotalJournals, targetPages, est.Round(time.Second))
 
-	// 3. Checkpoint: baca sekali, perbarui sesudah tiap halaman sukses
+	// 3. Checkpoint: baca sekali, perbarui sesudah tiap halaman sukses.
+	//    -refresh = wipe dulu (generasi konsisten, doc 16 Bagian 3.2) → baca jadi kosong.
+	if cfg.Refresh {
+		if err := store.ClearCheckpoint(cfg.RunKey); err != nil {
+			return nil, fmt.Errorf("wipe checkpoint (-refresh): %w", err)
+		}
+	}
 	done, err := store.CompletedPages(cfg.RunKey)
 	if err != nil {
 		return nil, fmt.Errorf("baca checkpoint: %w", err)
@@ -117,6 +128,19 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 			continue
 		}
 		pending = append(pending, page)
+	}
+
+	// Mode run (doc 16 Bagian 3.3 — pertimbangan user A): tegas antara
+	// fresh / lanjutan (bukan gagal) / refresh.
+	scrapeNow := targetPages - res.PagesSkipped
+	switch {
+	case cfg.Refresh:
+		logf("[mode] REFRESH (-refresh) — checkpoint di-wipe; semua %d halaman discrape ulang; perubahan konten dicatat via [ubah]", scrapeNow)
+	case res.PagesSkipped > 0:
+		logf("[mode] LANJUTAN (checkpoint) — %d halaman sudah ada dari run sebelumnya, dilewati BUKAN gagal; %d halaman discrape; hasil run ini tetap sah",
+			res.PagesSkipped, scrapeNow)
+	default:
+		logf("[mode] BARU (fresh) — tanpa checkpoint; %d halaman discrape dari nol", scrapeNow)
 	}
 	logf("[stage sinta] worker pool: %d workers | %d halaman antre (%d dilewati checkpoint)",
 		workers, len(pending), res.PagesSkipped)
@@ -207,8 +231,18 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 			res.JournalsSaved, res.TotalRecords)
 	}
 	logf("[verifikasi] %s", res.VerifyMsg)
-	logf("[stage sinta] selesai: saved=%d skipped=%d failed=%d jurnal=%d",
-		res.PagesSaved, res.PagesSkipped, res.PagesFailed, res.JournalsSaved)
+	// Status jujur (doc 16 Bagian 3.3): lanjutan dengan 0 gagal = BERHASIL,
+	// bukan terlihat seperti run yang gagal.
+	status := "BERHASIL"
+	switch {
+	case res.PagesFailed > 0:
+		status = fmt.Sprintf("GAGAL-SEBAGIAN (%d halaman gagal)", res.PagesFailed)
+	case strings.HasPrefix(res.VerifyMsg, "GAGAL"):
+		status = "GAGAL-VERIFIKASI (jumlah tidak cocok dengan server)"
+	}
+	logf("[stage sinta] selesai [%s]: saved=%d skipped=%d failed=%d | jurnal: %d diproses (baru %d, diperbarui %d, tidak berubah %d)",
+		status, res.PagesSaved, res.PagesSkipped, res.PagesFailed, res.JournalsSaved,
+		res.JournalsNew, res.JournalsUpdated, res.JournalsUnchanged)
 	return res, nil
 }
 
@@ -216,11 +250,26 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 // penting: data dulu, checkpoint kemudian — checkpoint gagal hanya berarti
 // halaman ini diulang pada run berikutnya (idempoten, aman).
 func savePage(store JournalStore, cfg StageConfig, page int, journals []Journal, res *StageResult) error {
-	if len(journals) == 0 && cfg.Logf != nil {
-		cfg.Logf("[peringatan] halaman %d: 0 kartu jurnal terdeteksi", page)
+	logf := cfg.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
-	if err := store.UpsertJournals(journals); err != nil {
+	if len(journals) == 0 {
+		logf("[peringatan] halaman %d: 0 kartu jurnal terdeteksi", page)
+	}
+	rep, err := store.UpsertJournals(journals)
+	if err != nil {
 		return fmt.Errorf("simpan halaman %d: %w", page, err)
+	}
+	res.JournalsNew += rep.New
+	res.JournalsUpdated += rep.Updated
+	res.JournalsUnchanged += rep.Unchanged
+	for _, ch := range rep.Changes {
+		parts := make([]string, 0, len(ch.Fields))
+		for _, f := range ch.Fields {
+			parts = append(parts, fmt.Sprintf("%s: %s→%s", f.Field, f.Old, f.New))
+		}
+		logf("[ubah] jurnal id=%d %q (halaman %d): %s", ch.ID, ch.Name, page, strings.Join(parts, " | "))
 	}
 	if err := store.MarkPageCompleted(cfg.RunKey, page); err != nil && cfg.Logf != nil {
 		cfg.Logf("[peringatan] checkpoint halaman %d gagal: %v", page, err)

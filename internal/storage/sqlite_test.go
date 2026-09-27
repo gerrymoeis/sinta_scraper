@@ -59,7 +59,7 @@ func TestUpsertAndCheckpoint(t *testing.T) {
 	j1 := sinta.Journal{ID: 101, Name: "Jurnal A", SintaRank: 1, SourcePage: 1,
 		IsScopus: true, Impact: 1.25, OJSURL: "https://ojs.a.test"}
 	j2 := sinta.Journal{ID: 102, Name: "Jurnal B", SintaRank: 2, SourcePage: 2}
-	if err := st.UpsertJournals([]sinta.Journal{j1, j2}); err != nil {
+	if _, err := st.UpsertJournals([]sinta.Journal{j1, j2}); err != nil {
 		t.Fatalf("UpsertJournals: %v", err)
 	}
 
@@ -87,8 +87,12 @@ func TestUpsertAndCheckpoint(t *testing.T) {
 	}
 
 	j1.Name = "Jurnal A (rev 2)"
-	if err := st.UpsertJournals([]sinta.Journal{j1}); err != nil {
+	rep, err := st.UpsertJournals([]sinta.Journal{j1})
+	if err != nil {
 		t.Fatalf("upsert kedua: %v", err)
+	}
+	if rep.Updated != 1 || len(rep.Changes) != 1 || rep.Changes[0].Fields[0].Field != "name" {
+		t.Errorf("laporan diff salah: %+v", rep)
 	}
 	var at2 sql.NullString
 	var name2, status2 string
@@ -120,5 +124,73 @@ func TestUpsertAndCheckpoint(t *testing.T) {
 	}
 	if other, err := st.CompletedPages("rank-2"); err != nil || len(other) != 0 {
 		t.Errorf("run-key terpisah harus kosong: %v, err=%v", other, err)
+	}
+
+	if err := st.ClearCheckpoint("rank-1"); err != nil {
+		t.Fatalf("ClearCheckpoint: %v", err)
+	}
+	if after, err := st.CompletedPages("rank-1"); err != nil || len(after) != 0 {
+		t.Errorf("setelah ClearCheckpoint harus kosong: %v, err=%v", after, err)
+	}
+}
+
+func TestUpsertDiff(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "diff.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	base := sinta.Journal{ID: 301, Name: "Jurnal D", SintaRank: 1, CitationsTotal: 10, SourcePage: 1}
+
+	rep, err := st.UpsertJournals([]sinta.Journal{base})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if rep.New != 1 || rep.Updated != 0 || rep.Unchanged != 0 {
+		t.Fatalf("laporan insert salah: %+v", rep)
+	}
+
+	rep, err = st.UpsertJournals([]sinta.Journal{base})
+	if err != nil {
+		t.Fatalf("upsert identik: %v", err)
+	}
+	if rep.Unchanged != 1 || rep.New != 0 || rep.Updated != 0 || len(rep.Changes) != 0 {
+		t.Errorf("laporan identik salah: %+v", rep)
+	}
+
+	chg := base
+	chg.SintaRank = 3
+	chg.CitationsTotal = 25
+	rep, err = st.UpsertJournals([]sinta.Journal{chg})
+	if err != nil {
+		t.Fatalf("upsert berubah: %v", err)
+	}
+	if rep.Updated != 1 || len(rep.Changes) != 1 || len(rep.Changes[0].Fields) != 2 {
+		t.Fatalf("laporan ubah salah: %+v", rep)
+	}
+	got := map[string]string{}
+	for _, f := range rep.Changes[0].Fields {
+		got[f.Field] = f.Old + "→" + f.New
+	}
+	if got["sinta_rank"] != "1→3" || got["citations_total"] != "10→25" {
+		t.Errorf("field berubah salah: %v", got)
+	}
+
+	var rank, cit int
+	if err := st.db.QueryRow(`SELECT sinta_rank, citations_total FROM journals WHERE id=301`).
+		Scan(&rank, &cit); err != nil {
+		t.Fatal(err)
+	}
+	if rank != 3 || cit != 25 {
+		t.Errorf("db tidak ter-update: rank=%d cit=%d", rank, cit)
+	}
+
+	rep, err = st.UpsertJournals([]sinta.Journal{{ID: 302, Name: "Jurnal E", SourcePage: 1}})
+	if err != nil {
+		t.Fatalf("upsert id baru: %v", err)
+	}
+	if rep.New != 1 {
+		t.Errorf("laporan id baru salah: %+v", rep)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sinta-scraper/internal/sinta"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -123,14 +124,71 @@ func (s *Store) MarkPageCompleted(runKey string, page int) error {
 	return err
 }
 
-func (s *Store) UpsertJournals(journals []sinta.Journal) error {
+// ClearCheckpoint menghapus semua progres halaman milik run-key (dipakai
+// -refresh, doc 16 Bagian 3.2): setelah wipe, baca checkpoint pasti kosong.
+func (s *Store) ClearCheckpoint(runKey string) error {
+	_, err := s.db.Exec(`DELETE FROM scrape_progress WHERE run_key = ?`, runKey)
+	return err
+}
+
+func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, error) {
+	rep := sinta.UpsertReport{}
+	if len(journals) == 0 {
+		return rep, nil
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return rep, err
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`
+	// 1. Baca baris lama (21 kolom konten + hash) — dasar deteksi perubahan.
+	ph := make([]string, len(journals))
+	ids := make([]any, len(journals))
+	for i, j := range journals {
+		ph[i] = "?"
+		ids[i] = j.ID
+	}
+	rows, err := tx.Query(`
+		SELECT id, name, sinta_profile_url, google_scholar_url, ojs_url, editor_url,
+			university, affiliation_name, affiliation_url, print_issn, electronic_issn,
+			COALESCE(subject_area, ''), sinta_rank, is_scopus, is_garuda,
+			COALESCE(scopus_url, ''), COALESCE(garuda_url, ''), COALESCE(doaj_url, ''),
+			COALESCE(impact, 0), COALESCE(h5_index, 0), COALESCE(citations_last_5_years, 0),
+			COALESCE(citations_total, 0), content_hash
+		FROM journals WHERE id IN (`+strings.Join(ph, ",")+`)`, ids...)
+	if err != nil {
+		return rep, err
+	}
+	type oldRow struct {
+		j    sinta.Journal
+		hash string
+	}
+	oldByID := map[int]oldRow{}
+	for rows.Next() {
+		var o oldRow
+		if err := rows.Scan(&o.j.ID, &o.j.Name, &o.j.SINTAProfileURL, &o.j.GoogleScholarURL,
+			&o.j.OJSURL, &o.j.EditorURL, &o.j.University, &o.j.AffiliationName,
+			&o.j.AffiliationURL, &o.j.PrintISSN, &o.j.ElectronicISSN, &o.j.SubjectArea,
+			&o.j.SintaRank, &o.j.IsScopus, &o.j.IsGaruda, &o.j.ScopusURL, &o.j.GarudaURL,
+			&o.j.DOAJURL, &o.j.Impact, &o.j.H5Index, &o.j.CitationsLast5Years,
+			&o.j.CitationsTotal, &o.hash); err != nil {
+			rows.Close()
+			return rep, err
+		}
+		oldByID[o.j.ID] = o
+	}
+	if err := rows.Err(); err != nil {
+		return rep, err
+	}
+	if err := rows.Close(); err != nil {
+		return rep, err
+	}
+
+	// 2. Empat statement: insert penuh (INSERT ... ON CONFLICT — tanpa kolom
+	//    ojs_* supaya state OJS stage berikutnya tidak bocor ter-reset),
+	//    update penuh, sentuh last_scraped_at, dan rehash (migrasi content_hash).
+	stmtInsert, err := tx.Prepare(`
 		INSERT INTO journals
 		(id, name, sinta_profile_url, google_scholar_url, ojs_url, editor_url,
 		university, affiliation_name, affiliation_url, print_issn, electronic_issn,
@@ -165,32 +223,124 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) error {
 		last_scraped_at = excluded.last_scraped_at
 		`)
 	if err != nil {
-		return err
+		return rep, err
 	}
-	defer stmt.Close()
+	defer stmtInsert.Close()
+	stmtUpdate, err := tx.Prepare(`
+		UPDATE journals SET
+			name = ?, sinta_profile_url = ?, google_scholar_url = ?, ojs_url = ?, editor_url = ?,
+			university = ?, affiliation_name = ?, affiliation_url = ?, print_issn = ?, electronic_issn = ?,
+			subject_area = ?, sinta_rank = ?, is_scopus = ?, is_garuda = ?, scopus_url = ?,
+			garuda_url = ?, doaj_url = ?, impact = ?, h5_index = ?, citations_last_5_years = ?,
+			citations_total = ?, source_page = ?, content_hash = ?, last_scraped_at = ?
+		WHERE id = ?`)
+	if err != nil {
+		return rep, err
+	}
+	defer stmtUpdate.Close()
+	stmtTouch, err := tx.Prepare(`UPDATE journals SET last_scraped_at = ? WHERE id = ?`)
+	if err != nil {
+		return rep, err
+	}
+	defer stmtTouch.Close()
+	stmtRehash, err := tx.Prepare(`UPDATE journals SET content_hash = ?, last_scraped_at = ? WHERE id = ?`)
+	if err != nil {
+		return rep, err
+	}
+	defer stmtRehash.Close()
 
+	// 3. Klasifikasi per kartu: baru / sama / diperbarui (doc 16 Bagian 3.1).
 	now := time.Now().UTC().Format(time.RFC3339)
 	for _, j := range journals {
-		_, err := stmt.Exec(
-			j.ID, j.Name, j.SINTAProfileURL, j.GoogleScholarURL, j.OJSURL, j.EditorURL,
-			j.University, j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
-			j.SubjectArea, j.SintaRank, boolToInt(j.IsScopus), boolToInt(j.IsGaruda),
-			j.ScopusURL, j.GarudaURL, j.DOAJURL,
-			j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
-			j.SourcePage, contentHash(j), now, now,
-		)
+		h := contentHash(j)
+		old, exists := oldByID[j.ID]
+		var err error
+		switch {
+		case !exists: // baru → INSERT penuh (sama seperti argumen lama baris 174-181)
+			_, err = stmtInsert.Exec(
+				j.ID, j.Name, j.SINTAProfileURL, j.GoogleScholarURL, j.OJSURL, j.EditorURL,
+				j.University, j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
+				j.SubjectArea, j.SintaRank, boolToInt(j.IsScopus), boolToInt(j.IsGaruda),
+				j.ScopusURL, j.GarudaURL, j.DOAJURL,
+				j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
+				j.SourcePage, h, now, now,
+			)
+			if err == nil {
+				rep.New++
+			}
+		case old.hash == h: // identik → tanpa tulis ulang konten
+			_, err = stmtTouch.Exec(now, j.ID)
+			if err == nil {
+				rep.Unchanged++
+			}
+		default: // hash beda → kebenaran = diff field
+			changes := diffJournals(old.j, j)
+			if len(changes) == 0 { // hash lama ≠ hash baru, konten sama = migrasi hash
+				_, err = stmtRehash.Exec(h, now, j.ID)
+				if err == nil {
+					rep.Unchanged++
+				}
+			} else {
+				_, err = stmtUpdate.Exec(
+					j.Name, j.SINTAProfileURL, j.GoogleScholarURL, j.OJSURL, j.EditorURL,
+					j.University, j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
+					j.SubjectArea, j.SintaRank, boolToInt(j.IsScopus), boolToInt(j.IsGaruda),
+					j.ScopusURL, j.GarudaURL, j.DOAJURL,
+					j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
+					j.SourcePage, h, now, j.ID,
+				)
+				if err == nil {
+					rep.Updated++
+					rep.Changes = append(rep.Changes, sinta.JournalChange{ID: j.ID, Name: j.Name, Fields: changes})
+				}
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("gagal upsert journal id=%d (%q): %w", j.ID, j.Name, err)
+			return rep, fmt.Errorf("gagal upsert journal id=%d (%q): %w", j.ID, j.Name, err)
 		}
 	}
-	return tx.Commit()
+	return rep, tx.Commit()
+}
+
+// diffJournals membandingkan 21 field konten; nama field = kolom db (snake_case).
+func diffJournals(old, cur sinta.Journal) []sinta.FieldChange {
+	var out []sinta.FieldChange
+	add := func(field string, o, n any) {
+		os, ns := fmt.Sprint(o), fmt.Sprint(n)
+		if os != ns {
+			out = append(out, sinta.FieldChange{Field: field, Old: os, New: ns})
+		}
+	}
+	add("name", old.Name, cur.Name)
+	add("sinta_profile_url", old.SINTAProfileURL, cur.SINTAProfileURL)
+	add("google_scholar_url", old.GoogleScholarURL, cur.GoogleScholarURL)
+	add("ojs_url", old.OJSURL, cur.OJSURL)
+	add("editor_url", old.EditorURL, cur.EditorURL)
+	add("university", old.University, cur.University)
+	add("affiliation_name", old.AffiliationName, cur.AffiliationName)
+	add("affiliation_url", old.AffiliationURL, cur.AffiliationURL)
+	add("print_issn", old.PrintISSN, cur.PrintISSN)
+	add("electronic_issn", old.ElectronicISSN, cur.ElectronicISSN)
+	add("subject_area", old.SubjectArea, cur.SubjectArea)
+	add("sinta_rank", old.SintaRank, cur.SintaRank)
+	add("is_scopus", old.IsScopus, cur.IsScopus)
+	add("is_garuda", old.IsGaruda, cur.IsGaruda)
+	add("scopus_url", old.ScopusURL, cur.ScopusURL)
+	add("garuda_url", old.GarudaURL, cur.GarudaURL)
+	add("doaj_url", old.DOAJURL, cur.DOAJURL)
+	add("impact", old.Impact, cur.Impact)
+	add("h5_index", old.H5Index, cur.H5Index)
+	add("citations_last_5_years", old.CitationsLast5Years, cur.CitationsLast5Years)
+	add("citations_total", old.CitationsTotal, cur.CitationsTotal)
+	return out
 }
 
 func contentHash(j sinta.Journal) string {
-	raw := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%v|%v|%v|%v|%v|%v",
+	raw := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%v|%v|%v|%v|%v|%v|%s|%s|%s|%s|%s|%s",
 		j.Name, j.OJSURL, j.University, j.AffiliationName, j.PrintISSN, j.ElectronicISSN,
 		j.SubjectArea, j.SintaRank, j.DOAJURL,
-		j.IsScopus, j.IsGaruda, j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal)
+		j.IsScopus, j.IsGaruda, j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
+		j.SINTAProfileURL, j.GoogleScholarURL, j.EditorURL, j.AffiliationURL, j.ScopusURL, j.GarudaURL)
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
 }
