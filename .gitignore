@@ -1,0 +1,21 @@
+# Output runtime — hasil run, bukan source
+/data/
+
+# Artefak build & profiling
+*.exe
+*.test
+*.out
+cpu.prof
+mem.prof
+
+# SQLite side-file (jaga jika -db keluar dari /data)
+*.db
+*.db-wal
+*.db-shm
+
+# Editor & OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
