@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sinta-scraper/internal/metrics"
 	"sinta-scraper/internal/sinta"
+	"sinta-scraper/internal/storage"
 	"strconv"
 	"strings"
 	"time"
@@ -89,20 +90,53 @@ func main() {
 	log.Printf("   extraQuery= %q", *extraQuery)
 	log.Printf("   maxPages =   %d", *maxPages)
 
-	client := sinta.NewHTTPClient("smoke")
-	req, err := sinta.NewGET(*baseURL, *userAgent)
-	if err != nil {
-		log.Fatalf("smoke: gagal buat request: %v", err)
+	// ── Stage pipeline ────────────────────────────────────────────────
+	var stageErr error
+	var sintaRes *sinta.StageResult
+
+	if stagesInclude(*stages, "sinta") {
+		store, err := storage.Open(*dbPath)
+		if err != nil {
+			log.Fatalf("GAGAL: buka db: %v", err)
+		}
+		defer store.Close()
+
+		sess, err := sinta.NewSession("sinta", *userAgent, *minDelay, *maxDelay)
+		if err != nil {
+			log.Fatalf("GAGAL: buat session: %v", err)
+		}
+
+		formData, err := resolveFilterForm(*filterData, *extraQuery, *rank)
+		if err != nil {
+			log.Fatalf("GAGAL: %v", err)
+		}
+		runKey := sinta.RunKeyFor(*filterData, *extraQuery, *rank)
+		log.Printf("run-key = %s | filter POST = %q", runKey, formData)
+
+		sintaRes, stageErr = sinta.RunSintaStage(sess, store, sinta.StageConfig{
+			BaseURL:    *baseURL,
+			FilterData: formData,
+			ExtraQuery: *extraQuery,
+			RunKey:     runKey,
+			MaxPages:   *maxPages,
+			MinDelay:   *minDelay,
+			MaxDelay:   *maxDelay,
+			Logf:       log.Printf,
+		})
+		if stageErr != nil {
+			log.Printf("stage sinta GAGAL: %v", stageErr)
+		}
+	} else {
+		log.Println("stage sinta tidak diminta (-stages), dilewati")
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatalf("smoke: gagal GET: %v", err)
+
+	if stagesInclude(*stages, "ojs") || stagesInclude(*stages, "pdf") {
+		log.Println("[info] stage ojs/pdf belum diimplementasi (Fase C/D) — dilewati pada build ini")
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	log.Printf("smoke: HTTP %d | %s", resp.StatusCode, *baseURL)
+
 	log.Print(metrics.Default.Report())
 
+	// ── Metrik SELALU ditulis di akhir (termasuk saat stage gagal) ────
 	metricsPath := filepath.Join(filepath.Dir(*logPath), "metrics.json")
 	payload := map[string]any{
 		"run_id": runID,
@@ -139,6 +173,15 @@ func main() {
 		log.Fatalf("GAGAL: tulis file metrik: %v", err)
 	}
 	log.Printf("metrik ditulis: %s", metricsPath)
+
+	// ── Exit code jujur ───────────────────────────────────────────────
+	if stageErr != nil {
+		os.Exit(1)
+	}
+	if sintaRes != nil && sintaRes.PagesFailed > 0 {
+		log.Printf("jalankan ulang command yang sama — checkpoint akan mengulang hanya %d halaman yang gagal", sintaRes.PagesFailed)
+		os.Exit(1)
+	}
 }
 
 func validStages(v string) error {
@@ -212,4 +255,28 @@ func validLatestVol(v string) error {
 		return nil
 	}
 	return fmt.Errorf("-latest-vol tidak valid: %q (pakai angka >= 1 | all)", v)
+}
+
+func stagesInclude(stages, want string) bool {
+	if stages == "all" {
+		return true
+	}
+	for _, tok := range strings.Split(stages, ",") {
+		if strings.TrimSpace(tok) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveFilterForm menerapkan prioritas doc 12: -filter > -query > -rank.
+// -query dijalankan lewat GET (tanpa POST/cookie); -rank disusun jadi form POST.
+func resolveFilterForm(filterRaw, query, rank string) (string, error) {
+	if filterRaw != "" {
+		return filterRaw, nil
+	}
+	if query != "" {
+		return "", nil
+	}
+	return sinta.BuildFilterForm(rank)
 }

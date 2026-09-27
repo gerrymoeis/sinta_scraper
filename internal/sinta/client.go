@@ -56,12 +56,13 @@ type Session struct {
 	filterInitAt time.Time
 
 	backoffs []time.Duration // jeda antar percobaan; test mengesankan jadi 0
+	limiter  *Limiter        // limiter untuk jeda antar request
 }
 
 // Cookie server hidup ±2 jam; refresh di 90 menit supaya aman.
-const cookieRefreshAfter = 90 * time.Minute
+const cookieRefreshAfter = 70 * time.Minute
 
-func NewSession(stage, userAgent string) (*Session, error) {
+func NewSession(stage, userAgent string, minDelay, maxDelay time.Duration) (*Session, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, fmt.Errorf("gagal buat cookie jar: %w", err)
@@ -83,6 +84,7 @@ func NewSession(stage, userAgent string) (*Session, error) {
 		},
 		ua:       userAgent,
 		backoffs: []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second},
+		limiter:  NewLimiter(minDelay, maxDelay),
 	}, nil
 }
 
@@ -103,6 +105,7 @@ func (s *Session) InitFilter(baseURL, formData string) error {
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
+	s.limiter.Wait()
 	resp, err := s.postClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST filter: %w", err)
@@ -170,6 +173,7 @@ func (s *Session) FetchPage(baseURL, extraQuery string, page int) (*FilterPageRe
 			time.Sleep(s.backoffs[idx])
 		}
 
+		s.limiter.Wait()
 		body, status, err := s.get(target)
 		if err == nil {
 			return ParsePage(bytes.NewReader(body), page)

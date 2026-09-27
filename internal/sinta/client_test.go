@@ -52,7 +52,7 @@ func TestInitFilterDanFetchPage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s, err := NewSession("test", "test-ua/1.0")
+	s, err := NewSession("test", "test-ua/1.0", 0, 0)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
