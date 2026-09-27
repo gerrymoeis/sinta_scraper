@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -74,6 +75,49 @@ func serveListing(t *testing.T) (srv *httptest.Server, posts, gets *int) {
 				w.Write([]byte(page2))
 			} else {
 				w.Write([]byte(page1))
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &p, &g
+}
+
+// serveListingParalel = varian 4 halaman (40 record) + counter atomik + jeda
+// 15ms per GET — memaksa fetch halaman 2-4 tumpang tindih (uji pool + -race).
+func serveListingParalel(t *testing.T) (srv *httptest.Server, posts, gets *atomic.Int64) {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/page1.html")
+	if err != nil {
+		t.Fatalf("baca fixture: %v", err)
+	}
+	base := strings.ReplaceAll(string(raw),
+		"Page 1 of 1.678 | Total Records 16.772",
+		"Page 1 of 4 | Total Records 40")
+	pages := map[string]string{
+		"1": base,
+		"2": strings.ReplaceAll(base, "/profile/", "/profile/9"),
+		"3": strings.ReplaceAll(base, "/profile/", "/profile/8"),
+		"4": strings.ReplaceAll(base, "/profile/", "/profile/7"),
+	}
+	var p, g atomic.Int64
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			p.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "ci_session", Value: "tok123", Path: "/"})
+			w.WriteHeader(http.StatusSeeOther)
+		case http.MethodGet:
+			g.Add(1)
+			if _, err := r.Cookie("ci_session"); err != nil {
+				t.Errorf("GET tanpa cookie ci_session — jar tidak bekerja?")
+				http.Error(w, "no cookie", http.StatusUnauthorized)
+				return
+			}
+			time.Sleep(15 * time.Millisecond) // beri ruang tumpang tindih antar worker
+			if html, ok := pages[r.URL.Query().Get("page")]; ok {
+				w.Write([]byte(html))
+			} else {
+				w.Write([]byte(base))
 			}
 		}
 	}))
@@ -215,6 +259,48 @@ func TestRunSintaStageGagalSebagian(t *testing.T) {
 	}
 	if store.checklist["rank-1"][2] {
 		t.Error("halaman 2 tidak boleh tercentang")
+	}
+}
+
+func TestRunSintaStageParalel(t *testing.T) {
+	srv, posts, gets := serveListingParalel(t)
+	store := newFakeStore()
+	form, err := BuildFilterForm("1")
+	if err != nil {
+		t.Fatalf("BuildFilterForm: %v", err)
+	}
+
+	res, err := RunSintaStage(newTestSession(t), store, StageConfig{
+		BaseURL:    srv.URL,
+		FilterData: form,
+		RunKey:     "rank-1",
+		Workers:    4,
+		Logf:       t.Logf,
+	})
+	if err != nil {
+		t.Fatalf("RunSintaStage: %v", err)
+	}
+
+	if posts.Load() != 1 {
+		t.Errorf("POST filter = %d, want 1", posts.Load())
+	}
+	if gets.Load() != 4 {
+		t.Errorf("GET = %d, want 4 (halaman 1-4, tanpa retry)", gets.Load())
+	}
+	if res.PagesSaved != 4 || res.JournalsSaved != 40 || res.PagesFailed != 0 {
+		t.Errorf("saved=%d halaman/%d jurnal failed=%d, want 4/40/0",
+			res.PagesSaved, res.JournalsSaved, res.PagesFailed)
+	}
+	if !res.Verified {
+		t.Errorf("Verified=false, VerifyMsg=%q", res.VerifyMsg)
+	}
+	if len(store.journals) != 40 {
+		t.Errorf("jurnal unik = %d, want 40", len(store.journals))
+	}
+	for p := 1; p <= 4; p++ {
+		if !store.checklist["rank-1"][p] {
+			t.Errorf("checkpoint halaman %d belum tercentang", p)
+		}
 	}
 }
 

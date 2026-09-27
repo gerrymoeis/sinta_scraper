@@ -1,11 +1,13 @@
 package sinta
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,6 +28,7 @@ type StageConfig struct {
 	MaxPages   int           // 0 = semua halaman (auto-detect)
 	MinDelay   time.Duration // hanya untuk estimasi durasi di log
 	MaxDelay   time.Duration
+	Workers    int // jumlah goroutine fetch; tulis DB tetap di koordinator
 	Logf       func(format string, args ...any)
 }
 
@@ -40,10 +43,17 @@ type StageResult struct {
 	VerifyMsg     string // selalu terisi — alasan verifikasi OK/dilewati/gagal
 }
 
-// RunSintaStage menjalankan stage sinta SEKUENSIAL: benar & tahan gangguan
-// dulu, paralelisasi menyusul. Alur (doc 12 Bagian 5):
-// POST filter → auto-detect halaman 1 → loop halaman belum-done →
-// batch upsert + checkpoint per halaman → verifikasi A1.
+// pageResult = outcome satu halaman dari worker → koordinator (single writer).
+type pageResult struct {
+	page int
+	pr   *FilterPageResult
+	err  error
+}
+
+// RunSintaStage menjalankan stage sinta: benar & tahan gangguan dulu
+// (halaman 1 sekuensial), sisanya via worker pool. Alur (doc 12 Bagian 5):
+// POST filter → auto-detect halaman 1 → pool halaman belum-done →
+// batch upsert + checkpoint per halaman (single writer) → verifikasi A1.
 func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageResult, error) {
 	logf := cfg.Logf
 	if logf == nil {
@@ -72,6 +82,10 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 	if cfg.MaxPages > 0 && cfg.MaxPages < targetPages {
 		targetPages = cfg.MaxPages
 	}
+	workers := cfg.Workers
+	if workers < 1 {
+		workers = 1
+	}
 	avgDelay := (cfg.MinDelay + cfg.MaxDelay) / 2
 	est := time.Duration(targetPages) * avgDelay
 	logf("[stage sinta] auto-detect: %d halaman | %d total record | target %d halaman | estimasi ~%v",
@@ -91,21 +105,68 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 		}
 	}
 
+	// 4. Sisa halaman (2..target) lewat worker pool: fetch paralel oleh `workers`
+	//    goroutine, TULIS tetap di goroutine ini (single-writer SQLite).
 	start := time.Now()
 	lastProgress := start
+
+	pending := make([]int, 0, targetPages-1)
 	for page := 2; page <= targetPages; page++ {
 		if done[page] {
 			res.PagesSkipped++
 			continue
 		}
-		pr, err := sess.FetchPage(cfg.BaseURL, cfg.ExtraQuery, page)
-		if err != nil {
+		pending = append(pending, page)
+	}
+	logf("[stage sinta] worker pool: %d workers | %d halaman antre (%d dilewati checkpoint)",
+		workers, len(pending), res.PagesSkipped)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	jobs := make(chan int)                    // dispatcher → worker (backpressure alami)
+	results := make(chan pageResult, workers) // worker → koordinator (buffer = workers)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for page := range jobs {
+				if ctx.Err() != nil {
+					continue // dibatalkan (gagal sistemik) — jangan mulai fetch baru
+				}
+				pr, err := sess.FetchPage(cfg.BaseURL, cfg.ExtraQuery, page)
+				results <- pageResult{page: page, pr: pr, err: err}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	go func() { // dispatcher
+		defer close(jobs)
+		for _, page := range pending {
+			select {
+			case jobs <- page:
+			case <-ctx.Done(): // berhenti antre; worker menghabiskan sisa lalu keluar
+				return
+			}
+		}
+	}()
+
+	var dbErr error
+	for r := range results { // koordinator = SATU-SATUNYA penulis DB
+		if r.err != nil {
 			res.PagesFailed++
-			logf("[gagal] halaman %d: %v (akan diulang pada run berikutnya)", page, err)
+			logf("[gagal] halaman %d: %v (akan diulang pada run berikutnya)", r.page, r.err)
 			continue // checkpoint memastikan rerun hanya mengulang yang gagal
 		}
-		if err := savePage(store, cfg, page, pr.Journals, res); err != nil {
-			return nil, err // kegagalan DB = sistemik → hentikan run
+		if err := savePage(store, cfg, r.page, r.pr.Journals, res); err != nil {
+			dbErr = err
+			cancel() // sistemik → worker berhenti fetch BARU
+			continue // PENTING: tetap menguras results sampai close — inilah anti-deadlocknya
 		}
 
 		// Progres ringan: tiap 10 halaman atau tiap 30 detik — bukan tiap halaman
@@ -121,8 +182,11 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 			lastProgress = time.Now()
 		}
 	}
+	if dbErr != nil {
+		return nil, dbErr // kegagalan DB = sistemik → hentikan run
+	}
 
-	// 4. Verifikasi (doc 13, A1): hanya run penuh yang bisa diverifikasi.
+	// 5. Verifikasi (doc 13, A1): hanya run penuh yang bisa diverifikasi.
 	//    Pembanding = Total Records yang diumumkan server PER RUN (bukan angka
 	//    mati) → non-flaky dan menangkap perubahan layout/filter di runtime.
 	switch {

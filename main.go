@@ -119,6 +119,7 @@ func main() {
 			ExtraQuery: *extraQuery,
 			RunKey:     runKey,
 			MaxPages:   *maxPages,
+			Workers:    *workers,
 			MinDelay:   *minDelay,
 			MaxDelay:   *maxDelay,
 			Logf:       log.Printf,
