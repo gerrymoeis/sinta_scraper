@@ -32,7 +32,13 @@ func NewHTTPClient(stage string) *http.Client {
 	}
 }
 
-func NewGET(rawURL, userAgent string) (*http.Request, error) {
+// NewGET membangun GET dengan header MINIMUM sesuai keputusan doc 14
+// Bagian 3 (keputusan user 29 Sep 2026 — opsi B): UA hibrida + Accept +
+// Accept-Language sebagai praktik baik, plus Referer yang secara harfiah
+// benar (kita datang dari listing base). TANPA sec-fetch-*/sec-ch-ua/
+// Upgrade-Insecure-Requests — tes doc 14 Bagian 1 membuktikan header itu
+// tidak diperiksa server, dan kita tidak meniru identitas browser.
+func NewGET(rawURL, userAgent, referer string) (*http.Request, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -40,6 +46,9 @@ func NewGET(rawURL, userAgent string) (*http.Request, error) {
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "id-ID,id;q=0.9,en;q=0.8")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
 	return req, nil
 }
 
@@ -102,8 +111,13 @@ func (s *Session) InitFilter(baseURL, formData string) error {
 		return fmt.Errorf("buat request filter: %w", err)
 	}
 	req.Header.Set("User-Agent", s.ua)
-	req.Header.Set("Accept", "text/html")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Referer/Origin = fakta navigasi (POST memang datang dari listing base
+	// di host yang sama); header browser lain sengaja TIDAK ditambah (doc 14).
+	req.Header.Set("Referer", baseURL)
+	if req.URL.Scheme != "" && req.URL.Host != "" {
+		req.Header.Set("Origin", req.URL.Scheme+"://"+req.URL.Host)
+	}
 
 	s.limiter.Wait()
 	resp, err := s.postClient.Do(req)
@@ -174,7 +188,7 @@ func (s *Session) FetchPage(baseURL, extraQuery string, page int) (*FilterPageRe
 		}
 
 		s.limiter.Wait()
-		body, status, err := s.get(target)
+		body, status, err := s.get(target, baseURL)
 		if err == nil {
 			return ParsePage(bytes.NewReader(body), page)
 		}
@@ -189,9 +203,10 @@ func (s *Session) FetchPage(baseURL, extraQuery string, page int) (*FilterPageRe
 }
 
 // get melakukan GET penuh. status dikembalikan (0 = gagal di jaringan)
-// agar FetchPage bisa memutuskan reinit filter pada 403.
-func (s *Session) get(target string) ([]byte, int, error) {
-	req, err := NewGET(target, s.ua)
+// agar FetchPage bisa memutuskan reinit filter pada 403. referer = base
+// listing (browser mengirim Referer saat navigasi antar halaman).
+func (s *Session) get(target, referer string) ([]byte, int, error) {
+	req, err := NewGET(target, s.ua, referer)
 	if err != nil {
 		return nil, 0, err
 	}
