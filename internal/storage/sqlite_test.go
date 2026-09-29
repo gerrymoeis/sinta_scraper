@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"sinta-scraper/internal/sinta"
+	"strings"
 	"testing"
 )
 
@@ -192,5 +193,52 @@ func TestUpsertDiff(t *testing.T) {
 	}
 	if rep.New != 1 {
 		t.Errorf("laporan id baru salah: %+v", rep)
+	}
+}
+
+// Langkah 23 (doc 18 Bagian 3.2): db versi lama punya kolom university
+// NOT NULL tanpa default — Open() wajib menjatuhkannya; tanpa itu,
+// INSERT pada db lama gagal karena kolom tidak ikut disebut kode baru.
+func TestOpenMigrasiHapusKolomUniversity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	// Replika skema lama: sisipkan kolom university ke skema sekarang.
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open legacy: %v", err)
+	}
+	legacySchema := strings.Replace(schema,
+		"affiliation_name TEXT NOT NULL,",
+		"university TEXT NOT NULL,\n\taffiliation_name TEXT NOT NULL,", 1)
+	if legacySchema == schema {
+		t.Fatal("injeksi kolom university gagal: anchor skema tidak cocok")
+	}
+	if _, err := legacy.Exec(legacySchema); err != nil {
+		t.Fatalf("eksekusi skema legacy: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("tutup db legacy: %v", err)
+	}
+
+	// Open versi baru → kolom harus ter-drop, lalu INSERT penuh jalan.
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open db legacy: %v", err)
+	}
+	defer st.Close()
+
+	var n int
+	if err := st.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('journals') WHERE name='university'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("cek pragma: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("kolom university masih ada setelah migrasi (n=%d)", n)
+	}
+	if _, err := st.UpsertJournals([]sinta.Journal{
+		{ID: 501, Name: "Jurnal Legacy", SourcePage: 1},
+	}); err != nil {
+		t.Fatalf("INSERT ke db legacy setelah migrasi: %v", err)
 	}
 }

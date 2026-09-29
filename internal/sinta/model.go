@@ -7,7 +7,6 @@ type Journal struct {
 	GoogleScholarURL    string
 	OJSURL              string
 	EditorURL           string
-	University          string
 	AffiliationName     string
 	AffiliationURL      string
 	PrintISSN           string

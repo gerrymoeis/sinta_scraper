@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS journals (
 	google_scholar_url TEXT NOT NULL,
 	ojs_url TEXT NOT NULL,
 	editor_url TEXT NOT NULL,
-	university TEXT NOT NULL,
 	affiliation_name TEXT NOT NULL,
 	affiliation_url TEXT NOT NULL,
 	print_issn TEXT NOT NULL,
@@ -90,7 +89,33 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("gagal migrasi schema: %w", err)
 	}
 
+	// Tahap 1b Langkah 23 (doc 18 Bagian 3.2): field university dihapus
+	// total — db lama masih punya kolomnya. Tanpa DROP, INSERT pada db
+	// lama gagal (university NOT NULL tanpa default). Db baru: kolom
+	// tidak ada → dilewati.
+	if err := dropLegacyUniversityColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("gagal migrasi hapus kolom university: %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// dropLegacyUniversityColumn membuang kolom `university` dari tabel
+// journals bila masih ada (idempoten — db baru tidak punya kolom ini).
+func dropLegacyUniversityColumn(db *sql.DB) error {
+	var n int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('journals') WHERE name = 'university'`,
+	).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE journals DROP COLUMN university`)
+	return err
 }
 
 func (s *Store) Close() error {
@@ -142,7 +167,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 	}
 	defer tx.Rollback()
 
-	// 1. Baca baris lama (21 kolom konten + hash) — dasar deteksi perubahan.
+	// 1. Baca baris lama (20 kolom konten + hash) — dasar deteksi perubahan.
 	ph := make([]string, len(journals))
 	ids := make([]any, len(journals))
 	for i, j := range journals {
@@ -151,7 +176,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 	}
 	rows, err := tx.Query(`
 		SELECT id, name, sinta_profile_url, google_scholar_url, ojs_url, editor_url,
-			university, affiliation_name, affiliation_url, print_issn, electronic_issn,
+			affiliation_name, affiliation_url, print_issn, electronic_issn,
 			COALESCE(subject_area, ''), sinta_rank, is_scopus, is_garuda,
 			COALESCE(scopus_url, ''), COALESCE(garuda_url, ''), COALESCE(doaj_url, ''),
 			COALESCE(impact, 0), COALESCE(h5_index, 0), COALESCE(citations_last_5_years, 0),
@@ -168,7 +193,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 	for rows.Next() {
 		var o oldRow
 		if err := rows.Scan(&o.j.ID, &o.j.Name, &o.j.SINTAProfileURL, &o.j.GoogleScholarURL,
-			&o.j.OJSURL, &o.j.EditorURL, &o.j.University, &o.j.AffiliationName,
+			&o.j.OJSURL, &o.j.EditorURL, &o.j.AffiliationName,
 			&o.j.AffiliationURL, &o.j.PrintISSN, &o.j.ElectronicISSN, &o.j.SubjectArea,
 			&o.j.SintaRank, &o.j.IsScopus, &o.j.IsGaruda, &o.j.ScopusURL, &o.j.GarudaURL,
 			&o.j.DOAJURL, &o.j.Impact, &o.j.H5Index, &o.j.CitationsLast5Years,
@@ -191,18 +216,17 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 	stmtInsert, err := tx.Prepare(`
 		INSERT INTO journals
 		(id, name, sinta_profile_url, google_scholar_url, ojs_url, editor_url,
-		university, affiliation_name, affiliation_url, print_issn, electronic_issn,
+		affiliation_name, affiliation_url, print_issn, electronic_issn,
 		subject_area, sinta_rank, is_scopus, is_garuda, scopus_url, garuda_url, doaj_url,
 		impact, h5_index, citations_last_5_years, citations_total,
 		source_page, content_hash, first_seen_at, last_scraped_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		sinta_profile_url = excluded.sinta_profile_url,
 		google_scholar_url = excluded.google_scholar_url,
 		ojs_url = excluded.ojs_url,
 		editor_url = excluded.editor_url,
-		university = excluded.university,
 		affiliation_name = excluded.affiliation_name,
 		affiliation_url = excluded.affiliation_url,
 		print_issn = excluded.print_issn,
@@ -229,7 +253,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 	stmtUpdate, err := tx.Prepare(`
 		UPDATE journals SET
 			name = ?, sinta_profile_url = ?, google_scholar_url = ?, ojs_url = ?, editor_url = ?,
-			university = ?, affiliation_name = ?, affiliation_url = ?, print_issn = ?, electronic_issn = ?,
+			affiliation_name = ?, affiliation_url = ?, print_issn = ?, electronic_issn = ?,
 			subject_area = ?, sinta_rank = ?, is_scopus = ?, is_garuda = ?, scopus_url = ?,
 			garuda_url = ?, doaj_url = ?, impact = ?, h5_index = ?, citations_last_5_years = ?,
 			citations_total = ?, source_page = ?, content_hash = ?, last_scraped_at = ?
@@ -259,7 +283,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 		case !exists: // baru → INSERT penuh (sama seperti argumen lama baris 174-181)
 			_, err = stmtInsert.Exec(
 				j.ID, j.Name, j.SINTAProfileURL, j.GoogleScholarURL, j.OJSURL, j.EditorURL,
-				j.University, j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
+				j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
 				j.SubjectArea, j.SintaRank, boolToInt(j.IsScopus), boolToInt(j.IsGaruda),
 				j.ScopusURL, j.GarudaURL, j.DOAJURL,
 				j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
@@ -283,7 +307,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 			} else {
 				_, err = stmtUpdate.Exec(
 					j.Name, j.SINTAProfileURL, j.GoogleScholarURL, j.OJSURL, j.EditorURL,
-					j.University, j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
+					j.AffiliationName, j.AffiliationURL, j.PrintISSN, j.ElectronicISSN,
 					j.SubjectArea, j.SintaRank, boolToInt(j.IsScopus), boolToInt(j.IsGaruda),
 					j.ScopusURL, j.GarudaURL, j.DOAJURL,
 					j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
@@ -302,7 +326,7 @@ func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, er
 	return rep, tx.Commit()
 }
 
-// diffJournals membandingkan 21 field konten; nama field = kolom db (snake_case).
+// diffJournals membandingkan 20 field konten; nama field = kolom db (snake_case).
 func diffJournals(old, cur sinta.Journal) []sinta.FieldChange {
 	var out []sinta.FieldChange
 	add := func(field string, o, n any) {
@@ -316,7 +340,6 @@ func diffJournals(old, cur sinta.Journal) []sinta.FieldChange {
 	add("google_scholar_url", old.GoogleScholarURL, cur.GoogleScholarURL)
 	add("ojs_url", old.OJSURL, cur.OJSURL)
 	add("editor_url", old.EditorURL, cur.EditorURL)
-	add("university", old.University, cur.University)
 	add("affiliation_name", old.AffiliationName, cur.AffiliationName)
 	add("affiliation_url", old.AffiliationURL, cur.AffiliationURL)
 	add("print_issn", old.PrintISSN, cur.PrintISSN)
@@ -336,8 +359,8 @@ func diffJournals(old, cur sinta.Journal) []sinta.FieldChange {
 }
 
 func contentHash(j sinta.Journal) string {
-	raw := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%v|%v|%v|%v|%v|%v|%s|%s|%s|%s|%s|%s",
-		j.Name, j.OJSURL, j.University, j.AffiliationName, j.PrintISSN, j.ElectronicISSN,
+	raw := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%v|%v|%v|%v|%v|%v|%s|%s|%s|%s|%s|%s",
+		j.Name, j.OJSURL, j.AffiliationName, j.PrintISSN, j.ElectronicISSN,
 		j.SubjectArea, j.SintaRank, j.DOAJURL,
 		j.IsScopus, j.IsGaruda, j.Impact, j.H5Index, j.CitationsLast5Years, j.CitationsTotal,
 		j.SINTAProfileURL, j.GoogleScholarURL, j.EditorURL, j.AffiliationURL, j.ScopusURL, j.GarudaURL)

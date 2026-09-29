@@ -107,3 +107,49 @@ func TestParsePageFixture(t *testing.T) {
 		}
 	}
 }
+
+// Langkah 22 (doc 18 Bagian 3.1): unit test normalisasi ISSN — varian
+// hyphen/spasi terbukti live di kartu SINTA (hal.8 "0216-1370", hal.14
+// "2088 351X"), plus X check-digit dan x huruf kecil.
+func TestNormalizeISSN(t *testing.T) {
+	cases := map[string]string{
+		"0216-1370": "02161370", // hyphen (Cakrawala, live hal.8)
+		"2088 351X": "2088351X", // spasi di tengah (Formatif, live hal.14)
+		"2615790X":  "2615790X", // X check-digit utuh
+		"2406825x":  "2406825X", // x huruf kecil → uppercase
+		"23391286":  "23391286", // polos tidak berubah
+		"0":         "",         // placeholder SINTA "tanpa ISSN" (live: JEBIS) → kosong
+		"":          "",         // e-only / kosong
+		"12345":     "12345",    // tidak 8 karakter → dipertahankan agar terlihat di validasi
+	}
+	for in, want := range cases {
+		if got := normalizeISSN(in); got != want {
+			t.Errorf("normalizeISSN(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// End-to-end parser: fixture dimodifikasi in-memory menjadi varian
+// hyphen + spasi; nilai akhir harus sama dengan ekspektasi ternormalisasi.
+// File fixture tidak diubah agar tetap mewakili page-1 live yang polos.
+func TestParseISSNNormalisasiVarian(t *testing.T) {
+	raw, err := os.ReadFile("testdata/page1.html")
+	if err != nil {
+		t.Fatalf("baca fixture: %v", err)
+	}
+	mod := strings.Replace(string(raw), "P-ISSN : 23391286", "P-ISSN : 2339-1286", 1)
+	mod = strings.Replace(mod, "E-ISSN :  20894392", "E-ISSN :  2089 4392", 1)
+
+	res, err := ParsePage(strings.NewReader(mod), 1)
+	if err != nil {
+		t.Fatalf("ParsePage: %v", err)
+	}
+	if len(res.Journals) != 10 {
+		t.Fatalf("jumlah kartu = %d, want 10", len(res.Journals))
+	}
+	j := res.Journals[0]
+	if j.PrintISSN != "23391286" || j.ElectronicISSN != "20894392" {
+		t.Errorf("kartu1 ISSN ternormalisasi = %q / %q, want 23391286 / 20894392",
+			j.PrintISSN, j.ElectronicISSN)
+	}
+}

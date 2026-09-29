@@ -11,9 +11,14 @@ import (
 )
 
 var (
-	reProfileID  = regexp.MustCompile(`/profile/(\d+)`)
-	rePISSN      = regexp.MustCompile(`P-ISSN\s*:\s*([0-9Xx]*)`)
-	reEISSN      = regexp.MustCompile(`E-ISSN\s*:\s*([0-9Xx]*)`)
+	reProfileID = regexp.MustCompile(`/profile/(\d+)`)
+	// ISSN ditangkap UTUH beserta pemisahnya ("0216-1370", "2088 351X")
+	// lalu dinormalisasi normalizeISSN — regex lama ([0-9Xx]*) berhenti
+	// di pemisah dan memotong ISSN (Langkah 22, doc 18 Bagian 3.1).
+	// awalan [0-9] membuat "P-ISSN : -" (e-only) tidak match → tetap kosong.
+	rePISSN = regexp.MustCompile(`P-ISSN\s*:\s*([0-9][0-9Xx\s-]*)`)
+	reEISSN = regexp.MustCompile(`E-ISSN\s*:\s*([0-9][0-9Xx\s-]*)`)
+
 	reSubject    = regexp.MustCompile(`Subject Area\s*:\s*(.+)$`)
 	reRank       = regexp.MustCompile(`S\s*(\d)`) // badge "S1 Accredited" → 1
 	rePagination = regexp.MustCompile(`Page\s+(\d+)\s+of\s+([\d.]+)\s*\|\s*Total Records\s+([\d.]+)`)
@@ -120,14 +125,15 @@ func parseCard(card *html.Node) (Journal, error) {
 	}
 
 	// ISSN + subject area — subject ADA di listing untuk sebagian jurnal,
-	// KOSONG untuk lainnya (Open Point #7)
+	// KOSONG untuk lainnya (Open Point #7). ISSN melewati normalizeISSN
+	// agar utuh walau kartu menulisnya dengan hyphen/spasi (Langkah 22).
 	if idDiv := findFirst(card, byClass("profile-id")); idDiv != nil {
 		text := textOf(idDiv)
 		if m := rePISSN.FindStringSubmatch(text); m != nil {
-			j.PrintISSN = m[1]
+			j.PrintISSN = normalizeISSN(m[1])
 		}
 		if m := reEISSN.FindStringSubmatch(text); m != nil {
-			j.ElectronicISSN = m[1]
+			j.ElectronicISSN = normalizeISSN(m[1])
 		}
 		if m := reSubject.FindStringSubmatch(text); m != nil {
 			j.SubjectArea = m[1]
@@ -178,6 +184,35 @@ func parseCard(card *html.Node) (Journal, error) {
 	}
 
 	return j, nil
+}
+
+// normalizeISSN mengubah tangkapan regex ISSN ("0216-1370", "2088 351X",
+// "2406825x") menjadi format kanonik: 8 karakter, tanpa pemisah, X
+// uppercase — format yang dipakai sebagai kunci pencarian Garuda, DOAJ,
+// dan OpenAlex (doc 18 Bagian 3.1). Yang hasilnya bukan 8 karakter
+// dikembalikan apa adanya (di-trim) supaya tetap terbaca di laporan
+// validasi, bukan hilang diam-diam.
+func normalizeISSN(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == 'x' || r == 'X':
+			b.WriteRune('X')
+		}
+	}
+	out := b.String()
+	// "0" = placeholder SINTA untuk ISSN yang tidak ada — terbukti live
+	// di kartu/profil JEBIS: literally "P-ISSN : 0" (setara Garuda "ISSN : -").
+	// Disamakan dengan "" supaya konsisten dengan jurnal e-only.
+	if out == "" || out == "0" {
+		return ""
+	}
+	if len(out) != 8 {
+		return strings.TrimSpace(s)
+	}
+	return out
 }
 
 // parsePagination mengambil "Page 1 of 1.678 | Total Records 16.772" dari
