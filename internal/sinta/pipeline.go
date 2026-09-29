@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +47,13 @@ type StageResult struct {
 	JournalsUnchanged int // konten identik → hanya sentuh last_scraped_at (tanpa tulis ulang)
 	Verified          bool
 	VerifyMsg         string // selalu terisi — alasan verifikasi OK/dilewati/gagal
+	UniqueIDs         int    // ID unik terlihat run ini — dasar verifikasi (doc 19 Bagian 9)
+	RepairRounds      int    // round perbaikan setelah defisit unik terdeteksi
+	RepairPages       int    // total halaman yang di-refetch saat repair
+
+	// Internal (bukan bagian kontrak keluar): tracker coverage.
+	seen     map[int]bool // ID unik yang sudah terlihat run ini
+	dupPages map[int]bool // halaman yang memunculkan ID sudah-terlihat (kandidat repair)
 }
 
 // pageResult = outcome satu halaman dari worker → koordinator (single writer).
@@ -210,25 +218,56 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 		return nil, dbErr // kegagalan DB = sistemik → hentikan run
 	}
 
-	// 5. Verifikasi (doc 13, A1): hanya run penuh yang bisa diverifikasi.
-	//    Pembanding = Total Records yang diumumkan server PER RUN (bukan angka
-	//    mati) → non-flaky dan menangkap perubahan layout/filter di runtime.
+	// 5. Perbaikan defisit kecil (doc 19 Bagian 9.5): sort=Citations membuat
+	//    defisit unik LANGKA (T13: 261/261 tiga round). Bila tetap defisit dan
+	//    ada duplikat → re-fetch halaman duplikat ±1, maks 2 round. Jendela
+	//    sempit = ±1: pergerakan terkonsentrasi lokal (T10b), perbaikan
+	//    murah. Bila masih kurang → jujur: UNRESOLVED, bukan klaim lengkap.
+	const maxRepairRounds = 2
+	fullRun := cfg.MaxPages == 0 && res.PagesSkipped == 0 && res.PagesFailed == 0
+	for round := 1; fullRun && len(res.dupPages) > 0 &&
+		res.uniqueIDs() < res.TotalRecords && round <= maxRepairRounds; round++ {
+		pages := repairPages(res.dupPages, targetPages)
+		res.RepairRounds = round
+		logf("[repair] round %d: defisit unik %d/%d → re-fetch %d halaman %v",
+			round, res.TotalRecords-res.uniqueIDs(), res.TotalRecords, len(pages), pages)
+		for _, p := range pages {
+			pr, err := sess.FetchPage(cfg.BaseURL, cfg.ExtraQuery, p)
+			if err != nil {
+				logf("[repair] halaman %d gagal: %v", p, err)
+				continue
+			}
+			if err := saveRepair(store, cfg, p, pr.Journals, res); err != nil {
+				return nil, err
+			}
+			res.RepairPages++
+		}
+	}
+	res.UniqueIDs = res.uniqueIDs()
+
+	// 6. Verifikasi berbasis ID UNIK (doc 19 Bagian 9.1): JournalsSaved
+	//    (jumlah kartu diproses) VACUOUS — duplikat offset kehilangan terbukti
+	//    di T10 (261 kartu ≠ 261 unik). Pembanding = |ID unik| vs Total
+	//    Records (angka T0, auto-detect per run).
 	switch {
 	case cfg.MaxPages > 0:
-		res.VerifyMsg = fmt.Sprintf("dilewati (run penuh tidak diminta, -max-pages=%d); server=%d, tersimpan run ini=%d",
-			cfg.MaxPages, res.TotalRecords, res.JournalsSaved)
+		res.VerifyMsg = fmt.Sprintf("dilewati (run penuh tidak diminta, -max-pages=%d); server=%d, unik run ini=%d",
+			cfg.MaxPages, res.TotalRecords, res.UniqueIDs)
 	case res.PagesSkipped > 0:
-		res.VerifyMsg = fmt.Sprintf("dilewati (resume: %d halaman dari run sebelumnya); server=%d, tersimpan run ini=%d",
-			res.PagesSkipped, res.TotalRecords, res.JournalsSaved)
+		res.VerifyMsg = fmt.Sprintf("dilewati (resume: %d halaman dari run sebelumnya); server=%d, unik run ini=%d",
+			res.PagesSkipped, res.TotalRecords, res.UniqueIDs)
 	case res.PagesFailed > 0:
 		res.VerifyMsg = fmt.Sprintf("dilewati (%d halaman gagal) — jalankan ulang untuk mengulangnya; server=%d",
 			res.PagesFailed, res.TotalRecords)
-	case res.JournalsSaved == res.TotalRecords:
+	case res.UniqueIDs == res.TotalRecords:
 		res.Verified = true
-		res.VerifyMsg = fmt.Sprintf("OK: %d jurnal = %d total records server", res.JournalsSaved, res.TotalRecords)
+		res.VerifyMsg = fmt.Sprintf("OK: %d ID unik = %d total records server", res.UniqueIDs, res.TotalRecords)
+	case res.UniqueIDs > res.TotalRecords:
+		res.VerifyMsg = fmt.Sprintf("GAGAL: ID unik %d > %d server — parser/scope tidak konsisten!",
+			res.UniqueIDs, res.TotalRecords)
 	default:
-		res.VerifyMsg = fmt.Sprintf("GAGAL: tersimpan %d, server mengumumkan %d — filter/parser tidak konsisten!",
-			res.JournalsSaved, res.TotalRecords)
+		res.VerifyMsg = fmt.Sprintf("UNRESOLVED: ID unik %d < %d server (kurang %d) — server tak menjamin coverage; jalankan ulang atau inspeksi manual",
+			res.UniqueIDs, res.TotalRecords, res.TotalRecords-res.UniqueIDs)
 	}
 	logf("[verifikasi] %s", res.VerifyMsg)
 	// Status jujur (doc 16 Bagian 3.3): lanjutan dengan 0 gagal = BERHASIL,
@@ -239,6 +278,8 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 		status = fmt.Sprintf("GAGAL-SEBAGIAN (%d halaman gagal)", res.PagesFailed)
 	case strings.HasPrefix(res.VerifyMsg, "GAGAL"):
 		status = "GAGAL-VERIFIKASI (jumlah tidak cocok dengan server)"
+	case strings.HasPrefix(res.VerifyMsg, "UNRESOLVED"):
+		status = fmt.Sprintf("UNRESOLVED (%d unik dari %d server)", res.UniqueIDs, res.TotalRecords)
 	}
 	logf("[stage sinta] selesai [%s]: saved=%d skipped=%d failed=%d | jurnal: %d diproses (baru %d, diperbarui %d, tidak berubah %d)",
 		status, res.PagesSaved, res.PagesSkipped, res.PagesFailed, res.JournalsSaved,
@@ -246,9 +287,9 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 	return res, nil
 }
 
-// savePage = upsert batch (1 transaksi per halaman) + checkpoint. Urutan
-// penting: data dulu, checkpoint kemudian — checkpoint gagal hanya berarti
-// halaman ini diulang pada run berikutnya (idempoten, aman).
+// savePage = catat seen + upsert batch (1 transaksi per halaman) + checkpoint.
+// Urutan penting: data dulu, checkpoint kemudian — checkpoint gagal hanya
+// berarti halaman ini diulang pada run berikutnya (idempoten, aman).
 func savePage(store JournalStore, cfg StageConfig, page int, journals []Journal, res *StageResult) error {
 	logf := cfg.Logf
 	if logf == nil {
@@ -264,19 +305,84 @@ func savePage(store JournalStore, cfg StageConfig, page int, journals []Journal,
 	res.JournalsNew += rep.New
 	res.JournalsUpdated += rep.Updated
 	res.JournalsUnchanged += rep.Unchanged
-	for _, ch := range rep.Changes {
-		parts := make([]string, 0, len(ch.Fields))
-		for _, f := range ch.Fields {
-			parts = append(parts, fmt.Sprintf("%s: %s→%s", f.Field, f.Old, f.New))
-		}
-		logf("[ubah] jurnal id=%d %q (halaman %d): %s", ch.ID, ch.Name, page, strings.Join(parts, " | "))
-	}
+	logChanges(logf, page, rep.Changes)
+	catatSeen(res, page, journals)
 	if err := store.MarkPageCompleted(cfg.RunKey, page); err != nil && cfg.Logf != nil {
 		cfg.Logf("[peringatan] checkpoint halaman %d gagal: %v", page, err)
 	}
 	res.PagesSaved++
 	res.JournalsSaved += len(journals)
 	return nil
+}
+
+// saveRepair = upsert + catat seen untuk hasil re-fetch perbaikan. TIDAK
+// menyentuh checkpoint/PagesSaved/JournalsSaved — halaman sudah "saved" dari
+// pass utama; ini re-fetch semata supaya statistik pass tetap jujur.
+func saveRepair(store JournalStore, cfg StageConfig, page int, journals []Journal, res *StageResult) error {
+	logf := cfg.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	if len(journals) == 0 {
+		logf("[repair] halaman %d: 0 kartu jurnal terdeteksi", page)
+	}
+	rep, err := store.UpsertJournals(journals)
+	if err != nil {
+		return fmt.Errorf("repair halaman %d: %w", page, err)
+	}
+	res.JournalsNew += rep.New
+	res.JournalsUpdated += rep.Updated
+	res.JournalsUnchanged += rep.Unchanged
+	logChanges(logf, page, rep.Changes)
+	catatSeen(res, page, journals)
+	return nil
+}
+
+// catatSeen menandai ID terlihat run ini; ID yang terulang → halaman ini
+// dicatat sebagai kandidat repair (defisit unik biasanya menyertainya).
+func catatSeen(res *StageResult, page int, journals []Journal) {
+	if res.seen == nil {
+		res.seen = map[int]bool{}
+		res.dupPages = map[int]bool{}
+	}
+	for _, j := range journals {
+		if res.seen[j.ID] {
+			res.dupPages[page] = true
+		}
+		res.seen[j.ID] = true
+	}
+}
+
+func (r *StageResult) uniqueIDs() int { return len(r.seen) }
+
+// repairPages = daftar halaman re-fetch: tiap halaman duplikat ±1 (jendela
+// sempit — pergerakan terkonsentrasi lokal, doc 19 Bagian 8), unik & terurut.
+func repairPages(dup map[int]bool, target int) []int {
+	set := map[int]bool{}
+	for p := range dup {
+		for _, q := range []int{p - 1, p, p + 1} {
+			if q >= 1 && q <= target {
+				set[q] = true
+			}
+		}
+	}
+	pages := make([]int, 0, len(set))
+	for p := range set {
+		pages = append(pages, p)
+	}
+	sort.Ints(pages)
+	return pages
+}
+
+// logChanges mencatat perubahan field per jurnal (dipakai savePage & saveRepair).
+func logChanges(logf func(string, ...any), page int, changes []JournalChange) {
+	for _, ch := range changes {
+		parts := make([]string, 0, len(ch.Fields))
+		for _, f := range ch.Fields {
+			parts = append(parts, fmt.Sprintf("%s: %s→%s", f.Field, f.Old, f.New))
+		}
+		logf("[ubah] jurnal id=%d %q (halaman %d): %s", ch.ID, ch.Name, page, strings.Join(parts, " | "))
+	}
 }
 
 // BuildFilterForm menyusun payload POST filter dari -rank (doc 12 Bagian 2).

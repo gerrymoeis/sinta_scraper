@@ -59,10 +59,11 @@ type Session struct {
 	postClient *http.Client // POST filter: 303 TIDAK diikuti (diset di konstruktor)
 	ua         string
 
-	mu           sync.Mutex // lindungi 3 field di bawah (worker pool = paralel)
+	mu           sync.Mutex // lindungi 4 field di bawah (worker pool = paralel)
 	filterBase   string
-	filterForm   string // "" = mode all (tanpa filter)
+	filterForm   string // "" = mode all / sort-only (tanpa filter)
 	filterInitAt time.Time
+	sortKey      int // 0 = default server; 1..5 = POST changesort (doc 19 Bagian 9)
 
 	backoffs []time.Duration // jeda antar percobaan; test mengesankan jadi 0
 	limiter  *Limiter        // limiter untuk jeda antar request
@@ -97,23 +98,74 @@ func NewSession(stage, userAgent string, minDelay, maxDelay time.Duration) (*Ses
 	}, nil
 }
 
-// InitFilter mengirim POST form filter ke baseURL. Server membalas 303 +
-// Set-Cookie ci_session. formData kosong → mode all, tanpa cookie, no-op.
+// SetSortKey mengatur kunci urutan yang diterapkan lewat POST changesort pada
+// tiap init/refresh sesi (doc 19 Bagian 9): 1=Impact … 4=Citations,
+// 5=Citations-5yr; 0 = biarkan default server. Urutan disimpan DI SESI server
+// (GET ?sort= diabaikan — teruji T4), jadi WAJIB ikut diulang saat cookie
+// di-refresh, bukan sekali di awal. Dipanggil sebelum InitFilter.
+func (s *Session) SetSortKey(n int) error {
+	if n < 0 || n > 5 {
+		return fmt.Errorf("sort tidak valid: %d (harus 0..5)", n)
+	}
+	s.mu.Lock()
+	s.sortKey = n
+	s.mu.Unlock()
+	return nil
+}
+
+// InitFilter mengirim POST form filter ke baseURL (dan POST changesort bila
+// sortKey>0). Server membalas 303 + Set-Cookie ci_session. formData kosong +
+// sortKey 0 → mode all, no-op.
 func (s *Session) InitFilter(baseURL, formData string) error {
-	if formData == "" {
+	s.mu.Lock() // serialisasi seluruh operasi init sesi
+	defer s.mu.Unlock()
+	return s.initSessionLocked(baseURL, formData)
+}
+
+// initSessionLocked = POST filter (bila ada) → POST changesort (bila sortKey>0).
+// Semua jalur refresh/reinit memanggil ini supaya sort TETAP terpasang saat
+// cookie diperbarui — tanpa ini, refresh di tengah crawl melempar urutan kembali
+// ke default (Impact) dan instabilitas tie kembali (doc 19 Bagian 9.4).
+// Dipanggil dengan s.mu SUDAH dipegang.
+func (s *Session) initSessionLocked(baseURL, formData string) error {
+	if formData == "" && s.sortKey == 0 {
 		return nil
 	}
-	s.mu.Lock() // serialisasi seluruh operasi filter
-	defer s.mu.Unlock()
+	if formData != "" {
+		ok, err := s.postFormLocked(baseURL, formData)
+		if err != nil {
+			return fmt.Errorf("POST filter: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("POST filter: cookie ci_session tidak ada di response")
+		}
+	}
+	if s.sortKey > 0 {
+		body := fmt.Sprintf("changesort=1&page=1&sort=%d", s.sortKey)
+		ok, err := s.postFormLocked(baseURL, body)
+		if err != nil {
+			return fmt.Errorf("POST changesort: %w", err)
+		}
+		if !ok && formData == "" {
+			return fmt.Errorf("POST changesort: cookie ci_session tidak ada di response")
+		}
+	}
+	s.filterBase = baseURL
+	s.filterForm = formData
+	s.filterInitAt = time.Now()
+	return nil
+}
 
-	req, err := http.NewRequest(http.MethodPost, baseURL, strings.NewReader(formData))
+// postFormLocked mengirim 1 POST urlencoded ke baseURL dengan header navigasi
+// (Referer/Origin fakta navigasi — doc 14 Opsi B). Mengembalikan true bila
+// response membawa cookie ci_session. Dipanggil dengan s.mu SUDAH dipegang.
+func (s *Session) postFormLocked(baseURL, body string) (bool, error) {
+	req, err := http.NewRequest(http.MethodPost, baseURL, strings.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("buat request filter: %w", err)
+		return false, fmt.Errorf("buat request: %w", err)
 	}
 	req.Header.Set("User-Agent", s.ua)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Referer/Origin = fakta navigasi (POST memang datang dari listing base
-	// di host yang sama); header browser lain sengaja TIDAK ditambah (doc 14).
 	req.Header.Set("Referer", baseURL)
 	if req.URL.Scheme != "" && req.URL.Host != "" {
 		req.Header.Set("Origin", req.URL.Scheme+"://"+req.URL.Host)
@@ -122,30 +174,27 @@ func (s *Session) InitFilter(baseURL, formData string) error {
 	s.limiter.Wait()
 	resp, err := s.postClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("POST filter: %w", err)
+		return false, fmt.Errorf("kirim: %w", err)
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body) // baca bersih → koneksi keep-alive bisa dipakai ulang
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return fmt.Errorf("POST filter: status %d", resp.StatusCode)
+		return false, fmt.Errorf("status %d", resp.StatusCode)
 	}
 	for _, ck := range resp.Cookies() {
 		if ck.Name == "ci_session" {
-			s.filterBase = baseURL
-			s.filterForm = formData
-			s.filterInitAt = time.Now()
-			return nil
+			return true, nil
 		}
 	}
-	return fmt.Errorf("POST filter: cookie ci_session tidak ada di response")
+	return false, nil
 }
 
 // refreshCookieIfNeeded re-POST bila cookie hampir lewat umur. Dipanggil
 // sebelum tiap GET.
 func (s *Session) refreshCookieIfNeeded() error {
 	s.mu.Lock()
-	need := s.filterForm != "" && time.Since(s.filterInitAt) >= cookieRefreshAfter
+	need := s.filterBase != "" && time.Since(s.filterInitAt) >= cookieRefreshAfter
 	base, form := s.filterBase, s.filterForm
 	s.mu.Unlock()
 	if !need {
@@ -159,8 +208,8 @@ func (s *Session) reinitFilterIfActive() error {
 	s.mu.Lock()
 	base, form := s.filterBase, s.filterForm
 	s.mu.Unlock()
-	if form == "" {
-		return nil // tanpa filter → tidak ada cookie yang bisa diperbarui
+	if base == "" {
+		return nil // tanpa POST sesi (mode all polos) → tidak ada yang bisa diperbarui
 	}
 	return s.InitFilter(base, form)
 }

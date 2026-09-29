@@ -184,6 +184,9 @@ func TestRunSintaStagePenuh(t *testing.T) {
 	if !res.Verified {
 		t.Errorf("Verified = false, VerifyMsg = %q", res.VerifyMsg)
 	}
+	if res.UniqueIDs != 20 {
+		t.Errorf("UniqueIDs = %d, want 20", res.UniqueIDs)
+	}
 	if len(store.journals) != 20 {
 		t.Errorf("jurnal unik di store = %d, want 20", len(store.journals))
 	}
@@ -310,6 +313,9 @@ func TestRunSintaStageParalel(t *testing.T) {
 	if !res.Verified {
 		t.Errorf("Verified=false, VerifyMsg=%q", res.VerifyMsg)
 	}
+	if res.UniqueIDs != 40 {
+		t.Errorf("UniqueIDs = %d, want 40", res.UniqueIDs)
+	}
 	// Invariant (doc 16 Bagian 5): tidak ada kartu yang hilang/dobel antara
 	// hitungan panjang slice (JournalsSaved) dan klasifikasi storage.
 	if res.JournalsNew+res.JournalsUpdated+res.JournalsUnchanged != res.JournalsSaved {
@@ -370,6 +376,106 @@ func TestRunSintaStageRefresh(t *testing.T) {
 	}
 	if !res2.Verified {
 		t.Errorf("refresh: Verified=false, VerifyMsg=%q", res2.VerifyMsg)
+	}
+}
+
+// TestRunSintaStageRepair: page2 sengaja salah (mengulang kartu page1) pada
+// pass utama → defisit unik + dup terdeteksi → repair re-fetch {1,2} → page2
+// benar → 20/20 unik = Verified. (Simulasi defisit kecil doc 19 Bagian 9.5.)
+func TestRunSintaStageRepair(t *testing.T) {
+	raw, err := os.ReadFile("testdata/page1.html")
+	if err != nil {
+		t.Fatalf("baca fixture: %v", err)
+	}
+	page1 := strings.ReplaceAll(string(raw),
+		"Page 1 of 1.678 | Total Records 16.772",
+		"Page 1 of 2 | Total Records 20")
+	page2 := strings.ReplaceAll(page1, "/profile/", "/profile/9")
+
+	var page2Hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			http.SetCookie(w, &http.Cookie{Name: "ci_session", Value: "tok123", Path: "/"})
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		if r.URL.Query().Get("page") == "2" {
+			page2Hits++
+			if page2Hits == 1 {
+				w.Write([]byte(page1)) // pass utama: page2 SALAH (dup) → defisit
+				return
+			}
+			w.Write([]byte(page2)) // setelah repair: page2 benar
+			return
+		}
+		w.Write([]byte(page1))
+	}))
+	defer srv.Close()
+
+	store := newFakeStore()
+	form, _ := BuildFilterForm("1")
+	res, err := RunSintaStage(newTestSession(t), store, StageConfig{
+		BaseURL: srv.URL, FilterData: form, RunKey: "rank-1", Logf: t.Logf,
+	})
+	if err != nil {
+		t.Fatalf("RunSintaStage: %v", err)
+	}
+	if res.RepairRounds != 1 || res.RepairPages != 2 {
+		t.Errorf("repair = %d round/%d halaman, want 1/2 (halaman duplikat 2 ±1 → {1,2})",
+			res.RepairRounds, res.RepairPages)
+	}
+	if !res.Verified || res.UniqueIDs != 20 {
+		t.Errorf("Verified=%v unik=%d, want true/20 (VerifyMsg=%q)", res.Verified, res.UniqueIDs, res.VerifyMsg)
+	}
+	if res.PagesSaved != 2 || res.JournalsSaved != 20 {
+		t.Errorf("pass utama harus tetap 2 halaman/20 jurnal (repair tak boleh dobel), got %d/%d",
+			res.PagesSaved, res.JournalsSaved)
+	}
+	if len(store.journals) != 20 {
+		t.Errorf("jurnal unik di store = %d, want 20", len(store.journals))
+	}
+}
+
+// TestRunSintaStageUnresolved: page2 selalu dup → repair 2 round tak menutup
+// defisit → verifikasi JUJUR "UNRESOLVED", bukan klaim lengkap.
+func TestRunSintaStageUnresolved(t *testing.T) {
+	raw, err := os.ReadFile("testdata/page1.html")
+	if err != nil {
+		t.Fatalf("baca fixture: %v", err)
+	}
+	page1 := strings.ReplaceAll(string(raw),
+		"Page 1 of 1.678 | Total Records 16.772",
+		"Page 1 of 2 | Total Records 20")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			http.SetCookie(w, &http.Cookie{Name: "ci_session", Value: "tok123", Path: "/"})
+			w.WriteHeader(http.StatusSeeOther)
+			return
+		}
+		w.Write([]byte(page1)) // page=2 juga selalu page1 → defisit permanen
+	}))
+	defer srv.Close()
+
+	store := newFakeStore()
+	form, _ := BuildFilterForm("1")
+	res, err := RunSintaStage(newTestSession(t), store, StageConfig{
+		BaseURL: srv.URL, FilterData: form, RunKey: "rank-1", Logf: t.Logf,
+	})
+	if err != nil {
+		t.Fatalf("RunSintaStage: %v", err)
+	}
+	if res.Verified {
+		t.Error("defisit permanen tidak boleh Verified=true")
+	}
+	if !strings.HasPrefix(res.VerifyMsg, "UNRESOLVED") {
+		t.Errorf("VerifyMsg = %q, harus diawali UNRESOLVED", res.VerifyMsg)
+	}
+	if res.UniqueIDs != 10 || res.TotalRecords != 20 {
+		t.Errorf("unik/server = %d/%d, want 10/20", res.UniqueIDs, res.TotalRecords)
+	}
+	if res.RepairRounds != 2 {
+		t.Errorf("RepairRounds = %d, want 2 (maks)", res.RepairRounds)
 	}
 }
 

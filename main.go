@@ -36,6 +36,7 @@ func main() {
 	filterData := flag.String("filter", "", "override raw POST filter (menimpa -rank)")
 	extraQuery := flag.String("query", "", "query string GET alternatif dari address bar (mis. sinta=6)")
 	maxPages := flag.Int("max-pages", 0, "batas halaman SINTA (0 = auto-detect)")
+	sortKey := flag.Int("sort", 4, "kunci urutan SINTA via POST changesort (tersimpan di sesi; GET ?sort= diabaikan): 1=Impact 2=H5 3=H 4=Citations 5=Citations-5yr | 0=urutan default server (doc 19 Bagian 9)")
 	noDelay := flag.Bool("no-delay", false, "matikan jeda etika global (paksa min-delay=max-delay=0s) — HANYA untuk eksperimen/load-test terkontrol; risiko throttling/blokir ditanggung pengguna")
 	refresh := flag.Bool("refresh", false, "abaikan + wipe checkpoint: semua halaman discrape ulang, perubahan data terdeteksi & dicatat (doc 16)")
 
@@ -123,7 +124,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("GAGAL: %v", err)
 		}
-		log.Printf("run-key = %s | filter POST = %q", runKey, formData)
+		if err := sess.SetSortKey(*sortKey); err != nil {
+			log.Fatalf("GAGAL: -sort: %v", err)
+		}
+		log.Printf("run-key = %s | filter POST = %q | sort = %d", runKey, formData, *sortKey)
 		stageStart := time.Now()
 
 		sintaRes, stageErr = sinta.RunSintaStage(sess, store, sinta.StageConfig{
@@ -165,6 +169,7 @@ func main() {
 			"min-delay":  minDelay.String(),
 			"max-delay":  maxDelay.String(),
 			"max-pages":  *maxPages,
+			"sort":       *sortKey,
 			"no-delay":   *noDelay,
 			"refresh":    *refresh,
 			"base-url":   *baseURL,
@@ -214,14 +219,25 @@ func main() {
 	}
 	if sintaRes != nil {
 		verif := "dilewati"
-		if sintaRes.Verified {
+		switch {
+		case sintaRes.Verified:
 			verif = "OK"
+		case strings.HasPrefix(sintaRes.VerifyMsg, "UNRESOLVED"):
+			verif = "UNRESOLVED"
+		case strings.HasPrefix(sintaRes.VerifyMsg, "GAGAL"):
+			verif = "GAGAL"
 		}
 		log.Printf("[RINGKASAN] halaman  : %d/%d tersimpan | %d dilewati | %d gagal",
 			sintaRes.PagesSaved, sintaRes.TotalPages, sintaRes.PagesSkipped, sintaRes.PagesFailed)
-		log.Printf("[RINGKASAN] jurnal   : %d diproses (baru %d | diperbarui %d | tidak berubah %d) | server umumkan %d | verifikasi %s",
+		log.Printf("[RINGKASAN] jurnal   : %d diproses (baru %d | diperbarui %d | tidak berubah %d) | server umumkan %d | unik %d | verifikasi %s",
 			sintaRes.JournalsSaved, sintaRes.JournalsNew, sintaRes.JournalsUpdated, sintaRes.JournalsUnchanged,
-			sintaRes.TotalRecords, verif)
+			sintaRes.TotalRecords, sintaRes.UniqueIDs, verif)
+		if sintaRes.RepairRounds > 0 {
+			log.Printf("[RINGKASAN] repair   : %d round, %d halaman di-refetch", sintaRes.RepairRounds, sintaRes.RepairPages)
+		}
+		if !sintaRes.Verified && sintaRes.VerifyMsg != "" {
+			log.Printf("[RINGKASAN] verifikasi detail: %s", sintaRes.VerifyMsg)
+		}
 	} else {
 		log.Print("[RINGKASAN] stage sinta : tidak ada hasil (lihat error/GAGAL di atas)")
 	}
