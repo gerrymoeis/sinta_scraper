@@ -20,19 +20,21 @@ type JournalStore interface {
 	MarkPageCompleted(runKey string, page int) error
 	CompletedPages(runKey string) (map[int]bool, error)
 	ClearCheckpoint(runKey string) error
+	RankCounts() (map[int]int, error) // distribusi sinta_rank di DB — sanity GAGAL-FILTER (doc 20)
 }
 
 type StageConfig struct {
-	BaseURL    string
-	FilterData string        // hasil final: -filter | BuildFilterForm(-rank) | "" (mode query/all)
-	ExtraQuery string        // -query, di-merge ke URL tiap halaman
-	RunKey     string        // namespace checkpoint (RunKeyFor)
-	Refresh    bool          // -refresh: wipe checkpoint dulu, semua halaman discrape ulang (doc 16)
-	MaxPages   int           // 0 = semua halaman (auto-detect)
-	MinDelay   time.Duration // hanya untuk estimasi durasi di log
-	MaxDelay   time.Duration
-	Workers    int // jumlah goroutine fetch; tulis DB tetap di koordinator
-	Logf       func(format string, args ...any)
+	BaseURL       string
+	FilterData    string        // hasil final: -filter | BuildFilterForm(-rank) | "" (mode query/all)
+	ExtraQuery    string        // -query, di-merge ke URL tiap halaman
+	RunKey        string        // namespace checkpoint (RunKeyFor)
+	Refresh       bool          // -refresh: wipe checkpoint dulu, semua halaman discrape ulang (doc 16)
+	MaxPages      int           // 0 = semua halaman (auto-detect)
+	MinDelay      time.Duration // hanya untuk estimasi durasi di log
+	MaxDelay      time.Duration
+	Workers       int // jumlah goroutine fetch; tulis DB tetap di koordinator
+	Logf          func(format string, args ...any)
+	ExpectedRanks []int // level -rank yang diminta (kosong = tanpa sanity; doc 20 Bagian 2.4)
 }
 
 type StageResult struct {
@@ -54,6 +56,7 @@ type StageResult struct {
 	// Internal (bukan bagian kontrak keluar): tracker coverage.
 	seen     map[int]bool // ID unik yang sudah terlihat run ini
 	dupPages map[int]bool // halaman yang memunculkan ID sudah-terlihat (kandidat repair)
+	runRanks map[int]int  // distribusi sinta_rank BARIS YANG DITULIS run ini (sanity doc 20)
 }
 
 // pageResult = outcome satu halaman dari worker → koordinator (single writer).
@@ -269,6 +272,51 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 		res.VerifyMsg = fmt.Sprintf("UNRESOLVED: ID unik %d < %d server (kurang %d) — server tak menjamin coverage; jalankan ulang atau inspeksi manual",
 			res.UniqueIDs, res.TotalRecords, res.TotalRecords-res.UniqueIDs)
 	}
+
+	// 6b. Sanity FILTER (doc 20 Bagian 2.4): verifikasi cakupan di atas hanya
+	//     membuktikan "semua yang server berikan diambil" — TIDAK membuktikan
+	//     "server memberi yang diminta". Bandingkan distribusi sinta_rank BARIS
+	//     RUN INI vs -rank. Sengaja pakai baris run-ini, bukan seluruh db:
+	//     satu db sah menampung banyak rank dari run berbeda (checkpoint
+	//     ter-namespaces per run-key) → cek db penuh akan false-positive.
+	if len(cfg.ExpectedRanks) > 0 && len(res.runRanks) > 0 {
+		allowed := make(map[int]bool, len(cfg.ExpectedRanks))
+		for _, r := range cfg.ExpectedRanks {
+			allowed[r] = true
+		}
+		var asing, hilang []string
+		for r, n := range res.runRanks {
+			if !allowed[r] {
+				asing = append(asing, fmt.Sprintf("S%d×%d", r, n))
+			}
+		}
+		for _, r := range cfg.ExpectedRanks {
+			if res.runRanks[r] == 0 {
+				hilang = append(hilang, fmt.Sprintf("S%d", r))
+			}
+		}
+		sort.Strings(asing)
+		switch {
+		case len(asing) > 0:
+			// rank asing = filter salah sasaran → SELALU fatal (termasuk resume)
+			res.Verified = false
+			res.VerifyMsg = fmt.Sprintf("GAGAL-FILTER: %d jurnal run ini di luar rank yang diminta %v (ditulis: %s)",
+				totalRows(res.runRanks), cfg.ExpectedRanks, strings.Join(asing, ", "))
+		case res.Verified && res.PagesSkipped == 0 && len(hilang) > 0:
+			// rank diminta hilang → hanya saat cakupan penuh TANPA resume
+			// (run resume boleh tak menulis rank yang barisnya dilewati checkpoint)
+			res.Verified = false
+			res.VerifyMsg = fmt.Sprintf("GAGAL-FILTER: rank %s diminta tapi tidak ada di hasil run (%s)",
+				strings.Join(hilang, ","), formatRankCounts(res.runRanks))
+		}
+	}
+	// Observasi distribusi db (tanpa vonis — db boleh multi-rank lintas run).
+	if counts, err := store.RankCounts(); err != nil {
+		logf("[peringatan] baca distribusi sinta_rank db gagal: %v", err)
+	} else if len(counts) > 0 {
+		logf("[rank-db] distribusi sinta_rank di db: %s", formatRankCounts(counts))
+	}
+
 	logf("[verifikasi] %s", res.VerifyMsg)
 	// Status jujur (doc 16 Bagian 3.3): lanjutan dengan 0 gagal = BERHASIL,
 	// bukan terlihat seperti run yang gagal.
@@ -276,6 +324,8 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 	switch {
 	case res.PagesFailed > 0:
 		status = fmt.Sprintf("GAGAL-SEBAGIAN (%d halaman gagal)", res.PagesFailed)
+	case strings.HasPrefix(res.VerifyMsg, "GAGAL-FILTER"):
+		status = fmt.Sprintf("GAGAL-FILTER (rank diminta %v, isi run tak cocok)", cfg.ExpectedRanks)
 	case strings.HasPrefix(res.VerifyMsg, "GAGAL"):
 		status = "GAGAL-VERIFIKASI (jumlah tidak cocok dengan server)"
 	case strings.HasPrefix(res.VerifyMsg, "UNRESOLVED"):
@@ -307,6 +357,7 @@ func savePage(store JournalStore, cfg StageConfig, page int, journals []Journal,
 	res.JournalsUnchanged += rep.Unchanged
 	logChanges(logf, page, rep.Changes)
 	catatSeen(res, page, journals)
+	catatRank(res, journals)
 	if err := store.MarkPageCompleted(cfg.RunKey, page); err != nil && cfg.Logf != nil {
 		cfg.Logf("[peringatan] checkpoint halaman %d gagal: %v", page, err)
 	}
@@ -335,7 +386,20 @@ func saveRepair(store JournalStore, cfg StageConfig, page int, journals []Journa
 	res.JournalsUnchanged += rep.Unchanged
 	logChanges(logf, page, rep.Changes)
 	catatSeen(res, page, journals)
+	catatRank(res, journals)
 	return nil
+}
+
+// catatRank mencatat distribusi sinta_rank baris yang ditulis run ini — bahan
+// sanity GAGAL-FILTER (doc 20). Sengaja BUKAN dari seluruh db: satu db sah
+// menampung banyak rank dari run berbeda (checkpoint ter-namespaces per run-key).
+func catatRank(res *StageResult, journals []Journal) {
+	if res.runRanks == nil {
+		res.runRanks = map[int]int{}
+	}
+	for _, j := range journals {
+		res.runRanks[j.SintaRank]++
+	}
 }
 
 // catatSeen menandai ID terlihat run ini; ID yang terulang → halaman ini
@@ -385,31 +449,94 @@ func logChanges(logf func(string, ...any), page int, changes []JournalChange) {
 	}
 }
 
-// BuildFilterForm menyusun payload POST filter dari -rank (doc 12 Bagian 2).
+func totalRows(counts map[int]int) int {
+	n := 0
+	for _, c := range counts {
+		n += c
+	}
+	return n
+}
+
+// formatRankCounts → "S1×261, S5×5395" (urut rank — pesan deterministik).
+func formatRankCounts(counts map[int]int) string {
+	parts := make([]string, 0, len(counts))
+	for r := 1; r <= 6; r++ {
+		if n := counts[r]; n > 0 {
+			parts = append(parts, fmt.Sprintf("S%d×%d", r, n))
+		}
+	}
+	for r, n := range counts { // rank di luar 1..6 (tak normal) tetap ditampilkan
+		if r < 1 || r > 6 {
+			parts = append(parts, fmt.Sprintf("S%d×%d", r, n))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ParseRankSet menafsirkan sintaks -rank (doc 20 Bagian 2.1):
+//
+//	"all" → nil (tanpa filter) | "1" → [1] | "1-5" → [1..5]
+//	"1,5" → [1 5] | "1,3-4" → [1 3 4] (token dipisah koma, boleh campur range)
+//
+// Level valid 1..6; hasil selalu unik & terurut naik.
+func ParseRankSet(rank string) ([]int, error) {
+	if rank == "all" {
+		return nil, nil
+	}
+	bad := func() error { return fmt.Errorf("-rank tidak valid untuk filter: %q", rank) }
+	levels := map[int]bool{}
+	for _, tok := range strings.Split(rank, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			return nil, bad()
+		}
+		if p := strings.Split(tok, "-"); len(p) == 2 {
+			a, errA := strconv.Atoi(p[0])
+			b, errB := strconv.Atoi(p[1])
+			if errA != nil || errB != nil || a < 1 || b > 6 || a > b {
+				return nil, bad()
+			}
+			for i := a; i <= b; i++ {
+				levels[i] = true
+			}
+			continue
+		}
+		n, err := strconv.Atoi(tok)
+		if err != nil || n < 1 || n > 6 {
+			return nil, bad()
+		}
+		levels[n] = true
+	}
+	if len(levels) == 0 {
+		return nil, bad()
+	}
+	out := make([]int, 0, len(levels))
+	for i := 1; i <= 6; i++ {
+		if levels[i] {
+			out = append(out, i)
+		}
+	}
+	return out, nil
+}
+
+// BuildFilterForm menyusun payload POST filter dari -rank (doc 12 Bagian 2,
+// doc 20 Bagian 2.2). VALUE = level akreditasi ITU SENDIRI — semantik server
+// teruji 30 Sep 2026 (value selalu 1 → salah sasaran: -rank 5 terbaca S1).
 // "all" → "" (tanpa POST — listing default server sudah seluruhnya).
 func BuildFilterForm(rank string) (string, error) {
-	if rank == "all" {
+	levels, err := ParseRankSet(rank)
+	if err != nil {
+		return "", err
+	}
+	if levels == nil { // all
 		return "", nil
 	}
-	join := func(a, b int) string {
-		var parts []string
-		for i := a; i <= b; i++ {
-			parts = append(parts, fmt.Sprintf("filter_accreditation[%d]=1", i))
-		}
-		parts = append(parts, "filter_journals=1")
-		return strings.Join(parts, "&")
+	parts := make([]string, 0, len(levels)+1)
+	for _, lv := range levels {
+		parts = append(parts, fmt.Sprintf("filter_accreditation[%d]=%d", lv, lv))
 	}
-	if len(rank) == 1 && rank >= "1" && rank <= "6" {
-		return join(int(rank[0]-'0'), int(rank[0]-'0')), nil
-	}
-	if p := strings.Split(rank, "-"); len(p) == 2 {
-		a, errA := strconv.Atoi(p[0])
-		b, errB := strconv.Atoi(p[1])
-		if errA == nil && errB == nil && a >= 1 && b <= 6 && a <= b {
-			return join(a, b), nil
-		}
-	}
-	return "", fmt.Errorf("-rank tidak valid untuk filter: %q", rank)
+	parts = append(parts, "filter_journals=1")
+	return strings.Join(parts, "&"), nil
 }
 
 // RunKeyFor membuat namespace checkpoint (doc 12 Bagian 4):

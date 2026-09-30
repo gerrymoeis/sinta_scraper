@@ -156,6 +156,25 @@ func (s *Store) ClearCheckpoint(runKey string) error {
 	return err
 }
 
+// RankCounts menghitung distribusi sinta_rank di seluruh DB — dipakai sanity
+// GAGAL-FILTER (doc 20 Bagian 2.4): memastikan data = -rank yang diminta.
+func (s *Store) RankCounts() (map[int]int, error) {
+	rows, err := s.db.Query(`SELECT sinta_rank, COUNT(*) FROM journals GROUP BY sinta_rank`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int]int{}
+	for rows.Next() {
+		var rank, n int
+		if err := rows.Scan(&rank, &n); err != nil {
+			return nil, err
+		}
+		out[rank] = n
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpsertJournals(journals []sinta.Journal) (sinta.UpsertReport, error) {
 	rep := sinta.UpsertReport{}
 	if len(journals) == 0 {

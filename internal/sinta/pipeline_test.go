@@ -59,6 +59,14 @@ func (f *fakeStore) CompletedPages(runKey string) (map[int]bool, error) {
 	return cp, nil
 }
 
+func (f *fakeStore) RankCounts() (map[int]int, error) {
+	out := map[int]int{}
+	for _, j := range f.journals {
+		out[j.SintaRank]++
+	}
+	return out, nil
+}
+
 // serveListing menyiapkan server tiruan: POST → 303 + ci_session; GET page=1
 // → fixture dengan pagination "2 halaman / 20 record"; GET page=2 → fixture
 // yang sama tapi ID profil diberi awalan 9 (10 jurnal unik berbeda).
@@ -160,10 +168,11 @@ func TestRunSintaStagePenuh(t *testing.T) {
 	}
 
 	res, err := RunSintaStage(newTestSession(t), store, StageConfig{
-		BaseURL:    srv.URL,
-		FilterData: form,
-		RunKey:     "rank-1",
-		Logf:       t.Logf,
+		BaseURL:       srv.URL,
+		FilterData:    form,
+		RunKey:        "rank-1",
+		Logf:          t.Logf,
+		ExpectedRanks: []int{1}, // jalur sehat: sanity rank harus TIDAK mengganggu OK
 	})
 	if err != nil {
 		t.Fatalf("RunSintaStage: %v", err)
@@ -479,12 +488,87 @@ func TestRunSintaStageUnresolved(t *testing.T) {
 	}
 }
 
+// TestRunSintaStageGagalFilter — sanity doc 20 Bagian 2.4 (pakai baris run-ini):
+// (a) server kembalikan rank salah (skenario bug value=[N]=1) → GAGAL-FILTER;
+// (b) rank diminta hilang saat cakupan penuh tanpa resume → GAGAL-FILTER;
+// (c) db punya rank lain dari run berbeda → TIDAK false-positive (sah).
+func TestRunSintaStageGagalFilter(t *testing.T) {
+	t.Run("salah-sasaran", func(t *testing.T) {
+		// fixture selalu S1, tapi kita "minta" S5 → tertulis S1 → asing
+		srv, _, _ := serveListing(t)
+		store := newFakeStore()
+		form, _ := BuildFilterForm("5")
+		res, err := RunSintaStage(newTestSession(t), store, StageConfig{
+			BaseURL: srv.URL, FilterData: form, RunKey: "rank-5",
+			ExpectedRanks: []int{5}, Logf: t.Logf,
+		})
+		if err != nil {
+			t.Fatalf("RunSintaStage: %v", err)
+		}
+		if res.Verified {
+			t.Error("rank salah sasaran tidak boleh lolos Verified")
+		}
+		if !strings.HasPrefix(res.VerifyMsg, "GAGAL-FILTER") {
+			t.Errorf("VerifyMsg = %q, harus diawali GAGAL-FILTER", res.VerifyMsg)
+		}
+		if !strings.Contains(res.VerifyMsg, "S1×20") {
+			t.Errorf("VerifyMsg = %q, harus menyebut pelaku S1×20", res.VerifyMsg)
+		}
+	})
+
+	t.Run("rank-hilang", func(t *testing.T) {
+		srv, _, _ := serveListing(t) // semua kartu S1, tak ada S5
+		store := newFakeStore()
+		form, _ := BuildFilterForm("1,5")
+		res, err := RunSintaStage(newTestSession(t), store, StageConfig{
+			BaseURL: srv.URL, FilterData: form, RunKey: "rank-1,5",
+			ExpectedRanks: []int{1, 5}, Logf: t.Logf,
+		})
+		if err != nil {
+			t.Fatalf("RunSintaStage: %v", err)
+		}
+		if res.Verified {
+			t.Error("rank hilang (S5) saat cakupan penuh tidak boleh lolos Verified")
+		}
+		if !strings.HasPrefix(res.VerifyMsg, "GAGAL-FILTER") {
+			t.Errorf("VerifyMsg = %q, harus diawali GAGAL-FILTER", res.VerifyMsg)
+		}
+		if !strings.Contains(res.VerifyMsg, "S5") {
+			t.Errorf("VerifyMsg = %q, harus menyebut S5 yang hilang", res.VerifyMsg)
+		}
+	})
+
+	t.Run("db-lintas-rank-tidak-false-positive", func(t *testing.T) {
+		// db sudah berisi rank lain (hasil run berbeda) → run -rank 1 tetap OK
+		srv, _, _ := serveListing(t)
+		store := newFakeStore()
+		store.journals[9999] = Journal{ID: 9999, Name: "Milik Run Lain", SintaRank: 5, SourcePage: 9}
+		form, _ := BuildFilterForm("1")
+		res, err := RunSintaStage(newTestSession(t), store, StageConfig{
+			BaseURL: srv.URL, FilterData: form, RunKey: "rank-1",
+			ExpectedRanks: []int{1}, Logf: t.Logf,
+		})
+		if err != nil {
+			t.Fatalf("RunSintaStage: %v", err)
+		}
+		if !res.Verified || !strings.HasPrefix(res.VerifyMsg, "OK") {
+			t.Errorf("db multi-rank sah tidak boleh memicu GAGAL-FILTER, got Verified=%v msg=%q",
+				res.Verified, res.VerifyMsg)
+		}
+	})
+}
+
 func TestBuildFilterForm(t *testing.T) {
 	want := map[string]string{
-		"1":   "filter_accreditation[1]=1&filter_journals=1",
-		"3":   "filter_accreditation[3]=1&filter_journals=1",
-		"2-4": "filter_accreditation[2]=1&filter_accreditation[3]=1&filter_accreditation[4]=1&filter_journals=1",
-		"all": "",
+		"1":     "filter_accreditation[1]=1&filter_journals=1",
+		"3":     "filter_accreditation[3]=3&filter_journals=1",
+		"2-4":   "filter_accreditation[2]=2&filter_accreditation[3]=3&filter_accreditation[4]=4&filter_journals=1",
+		"5":     "filter_accreditation[5]=5&filter_journals=1",
+		"1,5":   "filter_accreditation[1]=1&filter_accreditation[5]=5&filter_journals=1",
+		"5,1":   "filter_accreditation[1]=1&filter_accreditation[5]=5&filter_journals=1", // selalu urut naik
+		"1,3-4": "filter_accreditation[1]=1&filter_accreditation[3]=3&filter_accreditation[4]=4&filter_journals=1",
+		"1,1":   "filter_accreditation[1]=1&filter_journals=1", // dedupe
+		"all":   "",
 	}
 	for rank, expected := range want {
 		got, err := BuildFilterForm(rank)
@@ -496,9 +580,46 @@ func TestBuildFilterForm(t *testing.T) {
 			t.Errorf("BuildFilterForm(%q) = %q, want %q", rank, got, expected)
 		}
 	}
-	for _, bad := range []string{"7", "3-1", "0", "x", "1,2"} {
+	for _, bad := range []string{"7", "3-1", "0", "x", "1,", "1-7", "2,8", "-1", "1,,2"} {
 		if _, err := BuildFilterForm(bad); err == nil {
 			t.Errorf("BuildFilterForm(%q) seharusnya error", bad)
+		}
+	}
+}
+
+func TestParseRankSet(t *testing.T) {
+	cases := map[string][]int{
+		"1":     {1},
+		"5":     {5},
+		"1-5":   {1, 2, 3, 4, 5},
+		"1,5":   {1, 5},
+		"5,1":   {1, 5}, // urut naik
+		"1,3-4": {1, 3, 4},
+		"2-3,5": {2, 3, 5},
+	}
+	for rank, expected := range cases {
+		got, err := ParseRankSet(rank)
+		if err != nil {
+			t.Errorf("ParseRankSet(%q): %v", rank, err)
+			continue
+		}
+		if len(got) != len(expected) {
+			t.Errorf("ParseRankSet(%q) = %v, want %v", rank, got, expected)
+			continue
+		}
+		for i := range expected {
+			if got[i] != expected[i] {
+				t.Errorf("ParseRankSet(%q) = %v, want %v", rank, got, expected)
+				break
+			}
+		}
+	}
+	if got, err := ParseRankSet("all"); err != nil || got != nil {
+		t.Errorf("ParseRankSet(\"all\") = %v, %v; want nil, nil", got, err)
+	}
+	for _, bad := range []string{"7", "0", "x", "2-1"} {
+		if _, err := ParseRankSet(bad); err == nil {
+			t.Errorf("ParseRankSet(%q) seharusnya error", bad)
 		}
 	}
 }

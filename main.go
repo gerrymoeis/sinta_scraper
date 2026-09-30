@@ -20,7 +20,7 @@ import (
 func main() {
 	// Seleksi apa yang di scrape
 	stages := flag.String("stages", "all", "stage pipeline, dipisah koma: sinta,ojs,pdf,all")
-	rank := flag.String("rank", "1", "filter SINTA: 1-6, range A-B (mis. 1-3) | all")
+	rank := flag.String("rank", "1", "filter SINTA: 1-6 | rentang A-B (mis. 1-3) | daftar (mis. 1,5 — di PowerShell WAJIB kutip: -rank \"1,5\") | all")
 	year := flag.String("year", "latest", "filter tahun issue OJS: latest | tahun (2024) | all")
 	latestVol := flag.String("latest-vol", "1", "jumlah volume terbaru dari cakupan -year: angka (1) | all")
 	// Teknis bagaimana scrape berjalan
@@ -124,23 +124,33 @@ func main() {
 		if err != nil {
 			log.Fatalf("GAGAL: %v", err)
 		}
+		// ExpectedRanks (sanity GAGAL-FILTER, doc 20) hanya untuk jalur -rank:
+		// -filter/-query memakai payload bebas → tanpa cek rank.
+		var expectedRanks []int
+		if *filterData == "" && *extraQuery == "" {
+			expectedRanks, err = sinta.ParseRankSet(*rank)
+			if err != nil {
+				log.Fatalf("GAGAL: %v", err)
+			}
+		}
 		if err := sess.SetSortKey(*sortKey); err != nil {
 			log.Fatalf("GAGAL: -sort: %v", err)
 		}
-		log.Printf("run-key = %s | filter POST = %q | sort = %d", runKey, formData, *sortKey)
+		log.Printf("run-key = %s | filter POST = %q | rank = %v | sort = %d", runKey, formData, expectedRanks, *sortKey)
 		stageStart := time.Now()
 
 		sintaRes, stageErr = sinta.RunSintaStage(sess, store, sinta.StageConfig{
-			BaseURL:    *baseURL,
-			FilterData: formData,
-			ExtraQuery: *extraQuery,
-			RunKey:     runKey,
-			Refresh:    *refresh,
-			MaxPages:   *maxPages,
-			Workers:    *workers,
-			MinDelay:   *minDelay,
-			MaxDelay:   *maxDelay,
-			Logf:       log.Printf,
+			BaseURL:       *baseURL,
+			FilterData:    formData,
+			ExtraQuery:    *extraQuery,
+			RunKey:        runKey,
+			Refresh:       *refresh,
+			MaxPages:      *maxPages,
+			Workers:       *workers,
+			MinDelay:      *minDelay,
+			MaxDelay:      *maxDelay,
+			Logf:          log.Printf,
+			ExpectedRanks: expectedRanks,
 		})
 		stageDur = time.Since(stageStart)
 		if stageErr != nil {
@@ -222,6 +232,8 @@ func main() {
 		switch {
 		case sintaRes.Verified:
 			verif = "OK"
+		case strings.HasPrefix(sintaRes.VerifyMsg, "GAGAL-FILTER"):
+			verif = "GAGAL-FILTER"
 		case strings.HasPrefix(sintaRes.VerifyMsg, "UNRESOLVED"):
 			verif = "UNRESOLVED"
 		case strings.HasPrefix(sintaRes.VerifyMsg, "GAGAL"):
@@ -278,21 +290,13 @@ func validStages(v string) error {
 	return nil
 }
 
+// validRank memvalidasi sintaks -rank. Satu sumber kebenaran = ParseRankSet
+// di paket sinta (single | rentang A-B | daftar "1,5" | campuran | all).
 func validRank(v string) error {
-	if v == "all" {
-		return nil
+	if _, err := sinta.ParseRankSet(v); err != nil {
+		return fmt.Errorf("-rank tidak valid: %q (pakai A, mis. 2 | A-B, mis. 1-3 | daftar, mis. \"1,5\" | all)", v)
 	}
-	if len(v) == 1 && v >= "1" && v <= "6" {
-		return nil
-	}
-	if parts := strings.Split(v, "-"); len(parts) == 2 {
-		a, errA := strconv.Atoi(parts[0])
-		b, errB := strconv.Atoi(parts[1])
-		if errA == nil && errB == nil && a >= 1 && b <= 6 && a <= b {
-			return nil
-		}
-	}
-	return fmt.Errorf("-rank tidak valid: %q (pakai A, mis. 2 | A-B, mis. 1-3 | all)", v)
+	return nil
 }
 
 func validYear(v string) error {

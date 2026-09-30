@@ -242,3 +242,29 @@ func TestOpenMigrasiHapusKolomUniversity(t *testing.T) {
 		t.Fatalf("INSERT ke db legacy setelah migrasi: %v", err)
 	}
 }
+
+func TestRankCounts(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	if got, err := st.RankCounts(); err != nil || len(got) != 0 {
+		t.Fatalf("RankCounts db kosong = %v, %v; want map kosong", got, err)
+	}
+	if _, err := st.UpsertJournals([]sinta.Journal{
+		{ID: 1, Name: "A", SintaRank: 1, SourcePage: 1},
+		{ID: 2, Name: "B", SintaRank: 5, SourcePage: 1},
+		{ID: 3, Name: "C", SintaRank: 5, SourcePage: 2},
+	}); err != nil {
+		t.Fatalf("UpsertJournals: %v", err)
+	}
+	got, err := st.RankCounts()
+	if err != nil {
+		t.Fatalf("RankCounts: %v", err)
+	}
+	if got[1] != 1 || got[5] != 2 || len(got) != 2 {
+		t.Errorf("RankCounts = %v, want {1:1, 5:2}", got)
+	}
+}
