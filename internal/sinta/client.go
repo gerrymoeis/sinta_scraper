@@ -58,6 +58,8 @@ type Session struct {
 	getClient  *http.Client // GET: ikuti redirect normal
 	postClient *http.Client // POST filter: 303 TIDAK diikuti (diset di konstruktor)
 	ua         string
+	minDelay   time.Duration // disimpan utk Sibling() — sesi segar dengan delay etika sama (L3, doc 27)
+	maxDelay   time.Duration
 
 	mu           sync.Mutex // lindungi 4 field di bawah (worker pool = paralel)
 	filterBase   string
@@ -95,7 +97,17 @@ func NewSession(stage, userAgent string, minDelay, maxDelay time.Duration) (*Ses
 		ua:       userAgent,
 		backoffs: []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second},
 		limiter:  NewLimiter(minDelay, maxDelay),
+		minDelay: minDelay,
+		maxDelay: maxDelay,
 	}, nil
+}
+
+// Sibling membuat sesi BARU dengan UA + jeda etika yang sama (L3 doc 27).
+// Publisher recovery butuh sesi segar per partisi — pola cmd/partition (doc 22):
+// server hanya mengirim Set-Cookie ci_session saat sesi PHP dibuat; POST filter
+// lanjutan pada sesi lama direspons 303 tanpa cookie (ditolak initSessionLocked).
+func (s *Session) Sibling(stage string) (*Session, error) {
+	return NewSession(stage, s.ua, s.minDelay, s.maxDelay)
 }
 
 // SetSortKey mengatur kunci urutan yang diterapkan lewat POST changesort pada
@@ -110,6 +122,26 @@ func (s *Session) SetSortKey(n int) error {
 	s.mu.Lock()
 	s.sortKey = n
 	s.mu.Unlock()
+	return nil
+}
+
+// ChangeSort mengganti kunci urutan pada sesi HIDUP (doc 24 Tahap I3): POST
+// changesort dengan cookie lama — TANPA buat sesi baru / re-POST filter.
+// Server tak selalu mengirim cookie baru saat sesi sudah ada (wajar — pola
+// sama dengan changesort kedua di initSessionLocked), jadi ok=false bukan
+// error di sini. sortKey di-memory ikut diperbarui supaya refresh cookie
+// berikutnya konsisten dengan sort baru. Butuh sesi yang sudah InitFilter.
+func (s *Session) ChangeSort(baseURL string, n int) error {
+	if n < 0 || n > 5 {
+		return fmt.Errorf("sort tidak valid: %d (harus 0..5)", n)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	body := fmt.Sprintf("changesort=1&page=1&sort=%d", n)
+	if _, err := s.postFormLocked(baseURL, body); err != nil {
+		return fmt.Errorf("POST changesort: %w", err)
+	}
+	s.sortKey = n
 	return nil
 }
 

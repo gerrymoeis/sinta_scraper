@@ -24,17 +24,24 @@ type JournalStore interface {
 }
 
 type StageConfig struct {
-	BaseURL       string
-	FilterData    string        // hasil final: -filter | BuildFilterForm(-rank) | "" (mode query/all)
-	ExtraQuery    string        // -query, di-merge ke URL tiap halaman
-	RunKey        string        // namespace checkpoint (RunKeyFor)
-	Refresh       bool          // -refresh: wipe checkpoint dulu, semua halaman discrape ulang (doc 16)
-	MaxPages      int           // 0 = semua halaman (auto-detect)
-	MinDelay      time.Duration // hanya untuk estimasi durasi di log
-	MaxDelay      time.Duration
-	Workers       int // jumlah goroutine fetch; tulis DB tetap di koordinator
-	Logf          func(format string, args ...any)
-	ExpectedRanks []int // level -rank yang diminta (kosong = tanpa sanity; doc 20 Bagian 2.4)
+	BaseURL         string
+	FilterData      string        // hasil final: -filter | BuildFilterForm(-rank) | "" (mode query/all)
+	ExtraQuery      string        // -query, di-merge ke URL tiap halaman
+	RunKey          string        // namespace checkpoint (RunKeyFor)
+	Refresh         bool          // -refresh: wipe checkpoint dulu, semua halaman discrape ulang (doc 16)
+	MaxPages        int           // 0 = semua halaman (auto-detect)
+	MinDelay        time.Duration // hanya untuk estimasi durasi di log
+	MaxDelay        time.Duration
+	Workers         int // jumlah goroutine fetch; tulis DB tetap di koordinator
+	Logf            func(format string, args ...any)
+	ExpectedRanks   []int       // level -rank yang diminta (kosong = tanpa sanity; doc 20 Bagian 2.4)
+	MaxRepairRounds int         // 0 = default (6); -1 = one-pass (pass-1 murni tanpa repair, mode ukur L4 doc 28); >0 = batas atas round repair fixpoint (doc 24 Tahap I1)
+	RepairFreeze    int         // 0 = tanpa freeze; N = halaman 1..N ditahan dari refetch normal, dibuka otomatis saat plateau (soft-freeze, doc 24 Tahap I2)
+	AltSort         int         // 0 = mati; 1..5 = sort alternatif dicoba saat plateau lewat ChangeSort in-place (doc 24 Tahap I3)
+	RegionMode      string      // "" / "kumulatif" = default; "recompute" = dupPages di-reset tiap round, region hanya dari duplikat round terakhir (doc 25 L1)
+	T0Recheck       bool        // true = re-check TotalRecords (+1 request) saat fixpoint berhenti dgn defisit (plateau/maks-round/tanpa-kandidat) — guard perubahan total server di tengah run, bukan blocker (doc 26 L2)
+	RecoverCatalog  map[int]int // L3: peta id katalog → affiliation ID (dari -recover-katalog; kosong = publisher recovery mati — first-run buta dilewati, R9 doc 23; doc 27)
+	RecoverMaxPages int         // 0 = default (20); cap total halaman partition selama recovery (doc 27)
 }
 
 type StageResult struct {
@@ -52,6 +59,13 @@ type StageResult struct {
 	UniqueIDs         int    // ID unik terlihat run ini — dasar verifikasi (doc 19 Bagian 9)
 	RepairRounds      int    // round perbaikan setelah defisit unik terdeteksi
 	RepairPages       int    // total halaman yang di-refetch saat repair
+	RepairStop        string // alasan repair berhenti: verifikasi-ok | plateau | maks-round | tanpa-kandidat | "" (tak jalan) (doc 24 Tahap I1)
+	AltRounds         int    // round yang berjalan dengan sort alternatif (fallback plateau, doc 24 Tahap I3)
+	T0Recheck         string // "" = tak dijalankan; hasil re-check T0 saat plateau: "konfirmasi ..." | "BERUBAH ..." | "gagal: ..." (doc 26 L2)
+	RecoveryMissing   int    // missing ID = katalog \ run — kandidat di-recover (0 = recovery tak jalan) (doc 27 L3)
+	RecoveryPartisi   int    // partisi /journals/index/{affid} yang berhasil di-crawl
+	RecoveryPages     int    // halaman partition yang di-fetch (dibatasi RecoverMaxPages)
+	RecoveryFound     int    // missing ID yang ditemukan di partition & disimpan
 
 	// Internal (bukan bagian kontrak keluar): tracker coverage.
 	seen     map[int]bool // ID unik yang sudah terlihat run ini
@@ -221,32 +235,261 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 		return nil, dbErr // kegagalan DB = sistemik → hentikan run
 	}
 
-	// 5. Perbaikan defisit kecil (doc 19 Bagian 9.5): sort=Citations membuat
-	//    defisit unik LANGKA (T13: 261/261 tiga round). Bila tetap defisit dan
-	//    ada duplikat → re-fetch halaman duplikat ±1, maks 2 round. Jendela
-	//    sempit = ±1: pergerakan terkonsentrasi lokal (T10b), perbaikan
-	//    murah. Bila masih kurang → jujur: UNRESOLVED, bukan klaim lengkap.
-	const maxRepairRounds = 2
+	// 5. Perbaikan defisit — FIXPOINT + SOFT-FREEZE + FALLBACK ALT-SORT
+	//    (doc 24 Tahap I1-I3; mengganti cap keras 2 round doc 19 Bagian 9.5):
+	//    round baru SELAMA masih ada progres; berhenti saat unik == T0
+	//    (verifikasi-ok), plateau +0, kandidat habis (tanpa-kandidat), atau
+	//    -max-repair-rounds (maks-round). Urutan fallback saat plateau:
+	//    (1) buka freeze bila masih ada kandidat tertahan (I2) → (2) ganti
+	//    sort lewat ChangeSort in-place, 1+ round cadangan (I3; teruji probe:
+	//    server menerima perubahan sort di sesi hidup) → (3) stop plateau.
+	//    Eksperimen D (doc 23): 8/8 run mencapai T0; jendela tetap ±1 (T10b),
+	//    region dinamis dari dupPages.
+	const defaultRepairRounds = 6
+	maxRounds := cfg.MaxRepairRounds
+	if maxRounds == 0 {
+		maxRounds = defaultRepairRounds
+	}
+	// ONE-PASS (doc 28 L4): -max-repair-rounds -1 = pass-1 murni tanpa
+	// repair/alt-sort/freeze — mode ukur untuk eksperimen superset shielding;
+	// loop di bawah tak akan jalan (round <= -1 selalu false).
+	onePass := maxRounds < 0
+	freeze := cfg.RepairFreeze
+	if freeze < 0 {
+		freeze = 0
+	}
+	alt := cfg.AltSort
+	if alt < 0 {
+		alt = 0
+	}
+	// MODE REGION (doc 25 L1): kumulatif (default) = dupPages menumpuk dari
+	// pass → region round N = ±1 dari SEMUA duplikat yang pernah terlihat.
+	// recompute = tracker di-reset tiap round → region round N+1 hanya dari
+	// duplikat round N (hipotesis: region lebih kecil → request dipangkas).
+	recount := cfg.RegionMode == "recompute"
+	if recount {
+		logf("[repair] region-mode: recompute — dupPages di-reset tiap round (kumulatif = default)")
+	}
+	thawed := false  // freeze sudah dibuka (fallback I2) — berlaku sisa run
+	altUsed := false // sort sudah diganti (fallback I3) — sekali saja
+	// ESCALATION REGION BERTINGKAT (L5 F1, doc 29): plateau TIDAK langsung
+	// menyerah ke alt-sort — region diperluas bertahap dulu: ±1 → ±2 → span
+	// component (min-2..max+2) → baru alt-sort. Escape hatch utk kasus di
+	// mana defisit tak selalu contiguous/ekor (R2: instability tersebar).
+	// Alt-sort me-reset pad ke ±1: urutan baru → dupPages baru.
+	regionPad := 1
 	fullRun := cfg.MaxPages == 0 && res.PagesSkipped == 0 && res.PagesFailed == 0
 	for round := 1; fullRun && len(res.dupPages) > 0 &&
-		res.uniqueIDs() < res.TotalRecords && round <= maxRepairRounds; round++ {
-		pages := repairPages(res.dupPages, targetPages)
-		res.RepairRounds = round
-		logf("[repair] round %d: defisit unik %d/%d → re-fetch %d halaman %v",
-			round, res.TotalRecords-res.uniqueIDs(), res.TotalRecords, len(pages), pages)
-		for _, p := range pages {
-			pr, err := sess.FetchPage(cfg.BaseURL, cfg.ExtraQuery, p)
-			if err != nil {
-				logf("[repair] halaman %d gagal: %v", p, err)
+		res.uniqueIDs() < res.TotalRecords && round <= maxRounds; round++ {
+		var regFull []int
+		if regionPad >= 3 {
+			regFull = spanPages(res.dupPages, targetPages)
+		} else {
+			regFull = repairPages(res.dupPages, targetPages, regionPad)
+		}
+		pages := make([]int, 0, len(regFull))
+		blocked := false // ada kandidat tertahan freeze pada round ini?
+		for _, p := range regFull {
+			if !thawed && p <= freeze {
+				blocked = true
 				continue
 			}
-			if err := saveRepair(store, cfg, p, pr.Journals, res); err != nil {
-				return nil, err
-			}
-			res.RepairPages++
+			pages = append(pages, p)
 		}
+		if len(pages) == 0 {
+			// Semua kandidat tertahan freeze → buka sekarang (fallback I2);
+			// thawed sudah true berarti tak ada kandidat sama sekali.
+			if thawed {
+				res.RepairStop = "tanpa-kandidat"
+				break
+			}
+			thawed = true
+			pages = regFull
+			logf("[repair] freeze p1..%d menahan semua kandidat — membuka freeze (region penuh %d halaman)",
+				freeze, len(pages))
+		}
+		if recount {
+			// RECOMPUTE REGION (L1): region round ini sudah dihitung dari
+			// dupPages — reset SEBELUM fetch agar dup selama round ini menjadi
+			// SATU-SATUNYA dasar region round berikutnya.
+			res.dupPages = map[int]bool{}
+		}
+		res.RepairRounds = round
+		if altUsed {
+			res.AltRounds++
+		}
+		before := res.uniqueIDs()
+		logf("[repair] round %d: defisit unik %d/%d → re-fetch %d halaman %v",
+			round, res.TotalRecords-before, res.TotalRecords, len(pages), pages)
+		// Bounded parallel repair (L5 F3, doc 29): pool cfg.Workers seperti
+		// pass-1; limiter global Session tetap gate etika (paralelisme hanya
+		// menutupi latensi HTTP — laju request tak naik).
+		if err := fetchRepairBatch(sess, cfg, store, res, pages); err != nil {
+			return nil, err
+		}
+		gain := res.uniqueIDs() - before
+		if gain == 0 {
+			if !thawed && blocked {
+				// SOFT-FREEZE FALLBACK (I2): plateau saat masih ada kandidat
+				// tertahan → freeze dibuka untuk round cadangan region penuh.
+				// L5 F2 (doc 29): freeze/thaw = OPTIMIZATION murni, bukan
+				// correctness rule; thaw permanen (tak pernah re-freeze).
+				thawed = true
+				logf("[repair] plateau dengan kandidat tertahan freeze — membuka freeze p1..%d untuk round cadangan",
+					freeze)
+				continue
+			}
+			// L5 F1 (doc 29): eskalasi region SEBELUM alt-sort — plateau
+			// pertama ±1 → ±2 (tier 2/3), kedua → span component (tier 3/3),
+			// baru alt-sort saat tier habis. tiap kenaikan = round cadangan
+			// (region rehit di atas loop) — safety escape hatch, terutama utk
+			// defisit tak-contiguous (R2); pad TIDAK berubah selama masih ada
+			// gain (fixpoint lama identik).
+			if regionPad == 1 {
+				regionPad = 2
+				logf("[repair] plateau — region diperluas ±1 → ±2 (tier 2/3; escape hatch L5)")
+				continue
+			}
+			if regionPad == 2 {
+				regionPad = 3
+				logf("[repair] plateau — region diperluas ±2 → span component (tier 3/3; escape hatch L5)")
+				continue
+			}
+			if alt > 0 && !altUsed {
+				// FALLBACK ALT-SORT (I3): ganti urutan di sesi HIDUP
+				// (ChangeSort —1 POST, sesi tak terputus; teruji probe) lalu
+				// round cadangan dengan sort baru. Gagal POST → matikan alt.
+				// L5: pad di-reset ±1 — urutan baru → dupPages baru (kumulatif
+				// dibiarkan; perilaku alt-sort lama tetap saat pad sudah ±1).
+				if err := sess.ChangeSort(cfg.BaseURL, alt); err != nil {
+					logf("[repair] gagal ganti sort ke s%d: %v — fallback alt dimatikan", alt, err)
+					alt = 0
+				} else {
+					altUsed = true
+					regionPad = 1
+					logf("[repair] plateau — sort diganti ke s%d (fallback alt); pad reset ±1; round cadangan dengan urutan baru", alt)
+					continue
+				}
+			}
+			res.RepairStop = "plateau"
+			logf("[repair] round %d: plateau (+0 unik) — defisit %d tersisa; berhenti (fixpoint)",
+				round, res.TotalRecords-res.uniqueIDs())
+			break
+		}
+		logf("[repair] round %d: +%d unik → %d/%d", round, gain, res.uniqueIDs(), res.TotalRecords)
+	}
+	switch {
+	case res.RepairStop != "": // sudah diputus di dalam loop (plateau)
+	case onePass:
+		// one-pass eksplisit (L4): laporkan apa adanya; verifier tetap
+		// menentukan VERIFIED_COMPLETE/INCOMPLETE dari unik == T0.
+		res.RepairStop = "one-pass"
+	case !fullRun:
+	case res.uniqueIDs() >= res.TotalRecords:
+		if res.RepairRounds > 0 {
+			res.RepairStop = "verifikasi-ok"
+		}
+	case len(res.dupPages) == 0:
+		res.RepairStop = "tanpa-kandidat" // defisit tapi tak ada halaman dup → tak ada region untuk direpair
+	default:
+		res.RepairStop = "maks-round" // defisit masih ada setelah habisnya round
 	}
 	res.UniqueIDs = res.uniqueIDs()
+
+	// 5b. T0 RE-CHECK (L2 / R7 doc 23 — guard BUKAN blocker, doc 26): T0
+	//     diambil sekali dari p1 saat pass awal; saat fixpoint berhenti dgn
+	//     defisit tersisa — plateau, maks-round, atau tanpa-kandidat (semua
+	//     fallback I2/I3 sudah dicoba; keputusan user 2 Okt: diperluas dari
+	//     "plateau saja" agar kasus nyata maks-round Run A ikut ter-guard) —
+	//     1 request ulang p1 mendeteksi apakah TotalRecords server berubah di
+	//     tengah run. T0 berubah → verifier memakai angka terbaru. TIDAK
+	//     memaksa round baru; run resume/max-pages/failed tak kena (loop tak
+	//     jalan → RepairStop "").
+	t0Note := ""
+	stopWithDefisit := res.RepairStop == "plateau" || res.RepairStop == "maks-round" || res.RepairStop == "tanpa-kandidat"
+	if cfg.T0Recheck && stopWithDefisit && res.UniqueIDs < res.TotalRecords {
+		t0Awal := res.TotalRecords
+		pr, err := sess.FetchPage(cfg.BaseURL, cfg.ExtraQuery, 1)
+		switch {
+		case err != nil:
+			res.T0Recheck = fmt.Sprintf("gagal: %v", err)
+			logf("[recheck] re-check T0 saat %s gagal: %v — memakai T0 awal %d", res.RepairStop, err, t0Awal)
+		case pr.TotalJournals == t0Awal:
+			res.T0Recheck = fmt.Sprintf("konfirmasi saat %s: server masih %d", res.RepairStop, t0Awal)
+			t0Note = fmt.Sprintf("re-check T0: server masih %d", t0Awal)
+			logf("[recheck] T0 saat %s: server masih %d (awal %d) — defisit %d dikonfirmasi",
+				res.RepairStop, t0Awal, t0Awal, t0Awal-res.UniqueIDs)
+		default:
+			res.TotalRecords = pr.TotalJournals
+			res.T0Recheck = fmt.Sprintf("BERUBAH saat %s: %d → %d", res.RepairStop, t0Awal, pr.TotalJournals)
+			t0Note = fmt.Sprintf("T0 berubah %d→%d saat re-check %s", t0Awal, pr.TotalJournals, res.RepairStop)
+			logf("[recheck] T0 server BERUBAH di tengah run saat %s: %d → %d — verifier memakai T0 terbaru",
+				res.RepairStop, t0Awal, pr.TotalJournals)
+		}
+	}
+
+	// 5c. PUBLISHER-ASSISTED RECOVERY (L3 / R9 doc 23 — BACKSTOP, doc 27):
+	//     jendela sama dgn guard L2 (fixpoint berhenti + defisit, mode -rank).
+	//     Tanpa katalog → skip (R9: "bukan first-run buta"). Dengan katalog:
+	//     missing = katalog \ run-ini → resolve id→affid dari affiliation_url
+	//     (offline, tanpa request detail) → crawl /journals/index/{affid} satu
+	//     sesi SEGAR per partisi (Sibling — pola cmd/partition, doc 22) dgn
+	//     form filter sama → kartu disimpan via saveRepair (rank terkontrol →
+	//     sanity GAGAL-FILTER tetap berlaku) → verifier bagian 6 menilai ulang
+	//     dgn angka unik & T0 terbaru. Cap total halaman partition = RecoverMaxPages.
+	recNote := ""
+	if len(cfg.RecoverCatalog) > 0 && stopWithDefisit && res.UniqueIDs < res.TotalRecords {
+		if cfg.FilterData == "" {
+			logf("[recovery] dilewati: tanpa -rank (FilterData kosong) — partisi tak terfilter rank bisa menarik rank asing")
+		} else {
+			missing := map[int]int{} // id → affID (kandidat yang belum terlihat run ini)
+			for id, aff := range cfg.RecoverCatalog {
+				if aff > 0 && !res.seen[id] {
+					missing[id] = aff
+				}
+			}
+			res.RecoveryMissing = len(missing)
+			if len(missing) == 0 {
+				logf("[recovery] katalog tidak menambah ID di luar run ini — dilewati")
+			} else {
+				byAff := map[int][]int{}
+				for id, aff := range missing {
+					byAff[aff] = append(byAff[aff], id)
+				}
+				affs := make([]int, 0, len(byAff))
+				for a := range byAff {
+					affs = append(affs, a)
+				}
+				sort.Ints(affs) // deterministik
+				maxPages := cfg.RecoverMaxPages
+				if maxPages <= 0 {
+					maxPages = 20
+				}
+				pagesLeft := maxPages
+				logf("[recovery] %d missing ID dari katalog → %d partisi (cap %d halaman)",
+					len(missing), len(affs), maxPages)
+				for _, aff := range affs {
+					if pagesLeft <= 0 {
+						logf("[recovery] cap %d halaman habis — %d missing tersisa", maxPages, len(missing))
+						break
+					}
+					if err := recoverPartition(sess, store, cfg, res, aff, missing, &pagesLeft); err != nil {
+						logf("[recovery] partisi aff %d gagal: %v — lanjut partisi berikutnya", aff, err)
+					}
+					if len(missing) == 0 {
+						break
+					}
+				}
+				res.UniqueIDs = res.uniqueIDs() // verifier (bagian 6) memakai angka terbaru
+				if res.UniqueIDs < res.TotalRecords {
+					recNote = fmt.Sprintf("publisher recovery: %d/%d missing ketemu",
+						res.RecoveryFound, res.RecoveryMissing)
+				}
+				logf("[recovery] selesai: %d/%d missing ketemu | unik %d/%d",
+					res.RecoveryFound, res.RecoveryMissing, res.UniqueIDs, res.TotalRecords)
+			}
+		}
+	}
 
 	// 6. Verifikasi berbasis ID UNIK (doc 19 Bagian 9.1): JournalsSaved
 	//    (jumlah kartu diproses) VACUOUS — duplikat offset kehilangan terbukti
@@ -264,13 +507,26 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 			res.PagesFailed, res.TotalRecords)
 	case res.UniqueIDs == res.TotalRecords:
 		res.Verified = true
-		res.VerifyMsg = fmt.Sprintf("OK: %d ID unik = %d total records server", res.UniqueIDs, res.TotalRecords)
+		// Kontrak status (doc 24 Tahap I4): VERIFIED_COMPLETE hanya setelah
+		// verifier mencapai T0 — bukan klaim "100% guaranteed by server".
+		res.VerifyMsg = fmt.Sprintf("VERIFIED_COMPLETE: %d ID unik = %d total records server", res.UniqueIDs, res.TotalRecords)
 	case res.UniqueIDs > res.TotalRecords:
 		res.VerifyMsg = fmt.Sprintf("GAGAL: ID unik %d > %d server — parser/scope tidak konsisten!",
 			res.UniqueIDs, res.TotalRecords)
 	default:
-		res.VerifyMsg = fmt.Sprintf("UNRESOLVED: ID unik %d < %d server (kurang %d) — server tak menjamin coverage; jalankan ulang atau inspeksi manual",
+		// INCOMPLETE (dahulu UNRESOLVED — doc 24 Tahap I4): status INI yang
+		// dijamin jujur: laporan TIDAK dianggap lengkap sampai T0 tercapai.
+		res.VerifyMsg = fmt.Sprintf("INCOMPLETE: ID unik %d < %d server (kurang %d) — laporan tidak dianggap lengkap; jalankan ulang atau inspeksi manual",
 			res.UniqueIDs, res.TotalRecords, res.TotalRecords-res.UniqueIDs)
+	}
+	// Konteks re-check T0 (L2) & publisher recovery (L3) hanya menyusul status
+	// defisit/inkonsistensi — teks kontrak VERIFIED_COMPLETE & dilewati tidak
+	// disentuh.
+	if t0Note != "" && (strings.HasPrefix(res.VerifyMsg, "INCOMPLETE") || strings.HasPrefix(res.VerifyMsg, "GAGAL:")) {
+		res.VerifyMsg += "; " + t0Note
+	}
+	if recNote != "" && (strings.HasPrefix(res.VerifyMsg, "INCOMPLETE") || strings.HasPrefix(res.VerifyMsg, "GAGAL:")) {
+		res.VerifyMsg += "; " + recNote
 	}
 
 	// 6b. Sanity FILTER (doc 20 Bagian 2.4): verifikasi cakupan di atas hanya
@@ -318,8 +574,9 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 	}
 
 	logf("[verifikasi] %s", res.VerifyMsg)
-	// Status jujur (doc 16 Bagian 3.3): lanjutan dengan 0 gagal = BERHASIL,
-	// bukan terlihat seperti run yang gagal.
+	// Status jujur (doc 16 Bagian 3.3 + kontrak I4 doc 24): VERIFIED_COMPLETE
+	// hanya bila verifier mencapai T0; defisit tersisa = INCOMPLETE; sisanya
+	// tetap kelas status lama (GAGAL-*, dilewati/resume = BERHASIL).
 	status := "BERHASIL"
 	switch {
 	case res.PagesFailed > 0:
@@ -328,8 +585,10 @@ func RunSintaStage(sess *Session, store JournalStore, cfg StageConfig) (*StageRe
 		status = fmt.Sprintf("GAGAL-FILTER (rank diminta %v, isi run tak cocok)", cfg.ExpectedRanks)
 	case strings.HasPrefix(res.VerifyMsg, "GAGAL"):
 		status = "GAGAL-VERIFIKASI (jumlah tidak cocok dengan server)"
-	case strings.HasPrefix(res.VerifyMsg, "UNRESOLVED"):
-		status = fmt.Sprintf("UNRESOLVED (%d unik dari %d server)", res.UniqueIDs, res.TotalRecords)
+	case strings.HasPrefix(res.VerifyMsg, "INCOMPLETE"):
+		status = fmt.Sprintf("INCOMPLETE (%d unik dari %d server)", res.UniqueIDs, res.TotalRecords)
+	case res.Verified:
+		status = "VERIFIED_COMPLETE"
 	}
 	logf("[stage sinta] selesai [%s]: saved=%d skipped=%d failed=%d | jurnal: %d diproses (baru %d, diperbarui %d, tidak berubah %d)",
 		status, res.PagesSaved, res.PagesSkipped, res.PagesFailed, res.JournalsSaved,
@@ -390,6 +649,65 @@ func saveRepair(store JournalStore, cfg StageConfig, page int, journals []Journa
 	return nil
 }
 
+// recoverPartition (L3 doc 27) memcrawl SATU partisi publisher
+// /journals/index/{affid} dengan sesi SEGAR (Sibling — server hanya mengirim
+// Set-Cookie saat sesi PHP dibuat, pola cmd/partition doc 22) dan form filter
+// yang sama dengan run global. Semua halaman partisi diambil sampai budget
+// *pagesLeft habis; kartu disimpan lewat saveRepair (statistik + seen + rank
+// ikut tercatat → verifier & GAGAL-FILTER tetap konsisten). ID yang termasuk
+// `missing` dihapus dari map dan dihitung ke res.RecoveryFound.
+func recoverPartition(sess *Session, store JournalStore, cfg StageConfig, res *StageResult,
+	aff int, missing map[int]int, pagesLeft *int) error {
+	logf := cfg.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	psess, err := sess.Sibling("recovery")
+	if err != nil {
+		return fmt.Errorf("sesi partition: %w", err)
+	}
+	base := strings.TrimRight(cfg.BaseURL, "/") + "/index/" + strconv.Itoa(aff)
+	if err := psess.InitFilter(base, cfg.FilterData); err != nil {
+		return fmt.Errorf("init filter: %w", err)
+	}
+	first, err := psess.FetchPage(base, "", 1)
+	if err != nil {
+		return fmt.Errorf("fetch p1: %w", err)
+	}
+	res.RecoveryPartisi++
+	pages := first.TotalPages
+	if pages < 1 {
+		pages = 1
+	}
+	taken := 0
+	for p := 1; p <= pages && *pagesLeft > 0; p++ {
+		pr := first
+		if p > 1 {
+			if pr, err = psess.FetchPage(base, "", p); err != nil {
+				// Partisi kecil (1–4 halaman); p1 sudah disimpan sebelum gagal
+				// di sini — biarkan partisi berikutnya mencoba.
+				logf("[recovery] aff %d p%d gagal: %v", aff, p, err)
+				break
+			}
+		}
+		*pagesLeft--
+		res.RecoveryPages++
+		taken++
+		if err := saveRepair(store, cfg, p, pr.Journals, res); err != nil {
+			return err
+		}
+		for _, j := range pr.Journals {
+			if _, ok := missing[j.ID]; ok {
+				delete(missing, j.ID)
+				res.RecoveryFound++
+			}
+		}
+	}
+	logf("[recovery] aff %d: T0 partisi=%d, %d halaman, kumulatif %d missing ketemu",
+		aff, first.TotalJournals, taken, res.RecoveryFound)
+	return nil
+}
+
 // catatRank mencatat distribusi sinta_rank baris yang ditulis run ini — bahan
 // sanity GAGAL-FILTER (doc 20). Sengaja BUKAN dari seluruh db: satu db sah
 // menampung banyak rank dari run berbeda (checkpoint ter-namespaces per run-key).
@@ -419,12 +737,17 @@ func catatSeen(res *StageResult, page int, journals []Journal) {
 
 func (r *StageResult) uniqueIDs() int { return len(r.seen) }
 
-// repairPages = daftar halaman re-fetch: tiap halaman duplikat ±1 (jendela
-// sempit — pergerakan terkonsentrasi lokal, doc 19 Bagian 8), unik & terurut.
-func repairPages(dup map[int]bool, target int) []int {
+// repairPages = daftar halaman re-fetch: tiap halaman duplikat ±pad (jendela
+// dasar pad=1 ala T10b, doc 19 Bagian 8; L5 F1 doc 29 memperluas ke pad=2 saat
+// plateau tier-2), unik & terurut.
+func repairPages(dup map[int]bool, target, pad int) []int {
+	if pad < 1 {
+		pad = 1
+	}
 	set := map[int]bool{}
 	for p := range dup {
-		for _, q := range []int{p - 1, p, p + 1} {
+		for d := -pad; d <= pad; d++ {
+			q := p + d
 			if q >= 1 && q <= target {
 				set[q] = true
 			}
@@ -436,6 +759,121 @@ func repairPages(dup map[int]bool, target int) []int {
 	}
 	sort.Ints(pages)
 	return pages
+}
+
+// spanPages = tier-3 eskalasi L5 (doc 29): SATU blok kontigu
+// min(dup)-2 .. max(dup)+2 (clamped [1..target]) — menutup gap antar duplikat
+// yang tersebar; defisit tak selalu contiguous/ekor (saran user pasca-L4).
+func spanPages(dup map[int]bool, target int) []int {
+	if len(dup) == 0 {
+		return nil
+	}
+	minP, maxP := 0, 0
+	for p := range dup {
+		if minP == 0 || p < minP {
+			minP = p
+		}
+		if p > maxP {
+			maxP = p
+		}
+	}
+	lo, hi := minP-2, maxP+2
+	if lo < 1 {
+		lo = 1
+	}
+	if hi > target {
+		hi = target
+	}
+	pages := make([]int, 0, hi-lo+1)
+	for p := lo; p <= hi; p++ {
+		pages = append(pages, p)
+	}
+	return pages
+}
+
+// fetchRepairBatch = BOUNDED PARALLEL repair (L5 F3, doc 29): re-fetch halaman
+// region satu round lewat pool cfg.Workers — pola identik pass-1 (jobs/results/
+// koordinator). Limiter global Session TETAP jadi gate etika: paralelisme hanya
+// menutupi latensi HTTP, tidak menaik laju request. PENTING: hasil diproses
+// IN-ORDER mengikuti `pages` (buffer results → drain berurutan) — dupPages/
+// statistik identik persis dgn versi sekuensial (tanpa ini, arrival-order
+// paralel membuat region tak deterministik). Error DB membatalkan fetch baru
+// (ctx) lalu results tetap dikuras sampai close (anti-deadlock ala pass-1).
+func fetchRepairBatch(sess *Session, cfg StageConfig, store JournalStore, res *StageResult, pages []int) error {
+	logf := cfg.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	workers := cfg.Workers
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(pages) {
+		workers = len(pages)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	jobs := make(chan int)
+	results := make(chan pageResult, workers)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for page := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				pr, err := sess.FetchPage(cfg.BaseURL, cfg.ExtraQuery, page)
+				results <- pageResult{page: page, pr: pr, err: err}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	go func() {
+		defer close(jobs)
+		for _, page := range pages {
+			select {
+			case jobs <- page:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var dbErr error
+	next := 0 // indeks pages berikutnya yang harus diproses (urut)
+	buf := map[int]pageResult{}
+	handle := func(r pageResult) {
+		if r.err != nil {
+			logf("[repair] halaman %d gagal: %v (akan diulang pada run berikutnya)", r.page, r.err)
+			return
+		}
+		if err := saveRepair(store, cfg, r.page, r.pr.Journals, res); err != nil {
+			dbErr = err
+			cancel()
+			return
+		}
+		res.RepairPages++
+	}
+	for r := range results {
+		buf[r.page] = r
+		for next < len(pages) {
+			r, ok := buf[pages[next]]
+			if !ok {
+				break
+			}
+			delete(buf, pages[next])
+			next++
+			handle(r)
+		}
+	}
+	return dbErr
 }
 
 // logChanges mencatat perubahan field per jurnal (dipakai savePage & saveRepair).

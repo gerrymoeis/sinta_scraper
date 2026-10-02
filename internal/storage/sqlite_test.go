@@ -268,3 +268,60 @@ func TestRankCounts(t *testing.T) {
 		t.Errorf("RankCounts = %v, want {1:1, 5:2}", got)
 	}
 }
+
+// TestCatalogAffIDs — L3 (doc 27): resolver offline ID→affid dari db katalog.
+// Kontrak: parse /affiliations/profile/{id}; filter rank; tanpa URL valid →
+// baris dilewati (bukan error).
+func TestCatalogAffIDs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cat.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	if _, err := st.UpsertJournals([]sinta.Journal{
+		{ID: 10, Name: "A", SintaRank: 1, SourcePage: 1,
+			AffiliationURL: "https://sinta.kemdiktisaintek.go.id/affiliations/profile/8244358"},
+		{ID: 11, Name: "B", SintaRank: 6, SourcePage: 1,
+			AffiliationURL: "https://sinta.kemdiktisaintek.go.id/affiliations/profile/500"},
+		{ID: 12, Name: "C", SintaRank: 6, SourcePage: 2}, // tanpa URL → dilewati
+		{ID: 13, Name: "D", SintaRank: 6, SourcePage: 3,
+			AffiliationURL: "https://contoh.bukan-sinta.tld/lain/99"}, // bukan pola profil → dilewati
+	}); err != nil {
+		t.Fatalf("UpsertJournals: %v", err)
+	}
+
+	all, err := st.CatalogAffIDs(nil)
+	if err != nil {
+		t.Fatalf("CatalogAffIDs(nil): %v", err)
+	}
+	if len(all) != 2 || all[10] != 8244358 || all[11] != 500 {
+		t.Errorf("CatalogAffIDs(nil) = %v, want {10:8244358, 11:500}", all)
+	}
+
+	r6, err := st.CatalogAffIDs([]int{6})
+	if err != nil {
+		t.Fatalf("CatalogAffIDs([6]): %v", err)
+	}
+	if len(r6) != 1 || r6[11] != 500 {
+		t.Errorf("CatalogAffIDs([6]) = %v, want {11:500}", r6)
+	}
+
+	if got, err := st.CatalogAffIDs([]int{9}); err != nil || len(got) != 0 {
+		t.Errorf("CatalogAffIDs([9]) = %v, %v; want kosong", got, err)
+	}
+
+	// Jalur file read-only (dipakai main utk -recover-katalog): hasil identik,
+	// file katalog dibuka tanpa mutasi skema (mode=ro).
+	ro, err := CatalogAffIDsFile(path, []int{6})
+	if err != nil {
+		t.Fatalf("CatalogAffIDsFile: %v", err)
+	}
+	if len(ro) != 1 || ro[11] != 500 {
+		t.Errorf("CatalogAffIDsFile = %v, want {11:500}", ro)
+	}
+	if _, err := CatalogAffIDsFile(path+".tidak-ada.db", nil); err == nil {
+		t.Error("CatalogAffIDsFile file tak ada: want error, dapat nil")
+	}
+}

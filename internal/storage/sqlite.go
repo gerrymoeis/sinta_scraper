@@ -7,12 +7,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sinta-scraper/internal/sinta"
+	"strconv"
 	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// affProfileRe mencocokkan affidavit dari URL profil affiliations
+// (https://…/affiliations/profile/8244358 → 8244358) — resolver offline
+// ID→publisher untuk L3 (doc 27; R9 doc 23: dari katalog ekspektasi, bukan
+// parser halaman detail).
+var affProfileRe = regexp.MustCompile(`affiliations/profile/(\d+)`)
 
 const schema = `
 CREATE TABLE IF NOT EXISTS journals (
@@ -171,6 +179,64 @@ func (s *Store) RankCounts() (map[int]int, error) {
 			return nil, err
 		}
 		out[rank] = n
+	}
+	return out, rows.Err()
+}
+
+// CatalogAffIDs memuat peta id jurnal → affiliation ID dari sebuah db KATALOG
+// untuk publisher recovery (L3, doc 27): missing ID = katalog \ run-ini lalu
+// di-resolve ke /journals/index/{affid} tanpa request halaman detail.
+// ranks kosong = semua rank; selain itu hanya baris rank yang diminta (satu
+// katalog boleh berisi banyak rank lintas run). Baris tanpa
+// affiliation_url valid dilewati (missing-nya tetap tak teratasi — dicatat
+// pipeline sebagai unresolved, bukan hilang diam-diam).
+func (s *Store) CatalogAffIDs(ranks []int) (map[int]int, error) {
+	return queryCatalogAffIDs(s.db, ranks)
+}
+
+// CatalogAffIDsFile = CatalogAffIDs tanpa lewat Open(): baca db katalog
+// read-only (mode=ro) supaya TIDAK dimutasi skemanya oleh CREATE/migrasi
+// Open() — file katalog milik run/arsip lain harus dibiarkan persis apa
+// adanya (L3 doc 27).
+func CatalogAffIDsFile(path string, ranks []int) (map[int]int, error) {
+	uri := "file:" + filepath.ToSlash(path) + "?mode=ro"
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return nil, fmt.Errorf("buka katalog (read-only): %w", err)
+	}
+	defer db.Close()
+	return queryCatalogAffIDs(db, ranks)
+}
+
+func queryCatalogAffIDs(db *sql.DB, ranks []int) (map[int]int, error) {
+	q := `SELECT id, affiliation_url FROM journals`
+	var args []any
+	if len(ranks) > 0 {
+		ph := make([]string, len(ranks))
+		for i, r := range ranks {
+			ph[i] = "?"
+			args = append(args, r)
+		}
+		q += ` WHERE sinta_rank IN (` + strings.Join(ph, ",") + `)`
+	}
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[int]int{}
+	for rows.Next() {
+		var id int
+		var affURL string
+		if err := rows.Scan(&id, &affURL); err != nil {
+			return nil, err
+		}
+		if m := affProfileRe.FindStringSubmatch(affURL); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				out[id] = n
+			}
+		}
 	}
 	return out, rows.Err()
 }

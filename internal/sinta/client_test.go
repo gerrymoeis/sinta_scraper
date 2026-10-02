@@ -148,6 +148,82 @@ func TestInitFilterDenganSort(t *testing.T) {
 	}
 }
 
+// TestChangeSort memastikan (doc 24 Tahap I3): (1) POST changesort terkirim
+// ke sesi hidup dengan sort baru, (2) response TANPA cookie ci_session BUKAN
+// error (pola asli server pada sesi hidup — sesi sudah ada, tak diganti),
+// (3) sortKey di-memory ikut diperbarui → refresh cookie berikutnya memakai
+// sort BARU, (4) nilai di luar 0..5 ditolak.
+func TestChangeSort(t *testing.T) {
+	var labels []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		if r.Form.Get("changesort") == "1" {
+			labels = append(labels, "sort:"+r.Form.Get("sort"))
+			w.WriteHeader(http.StatusSeeOther) // sesi hidup: TANPA Set-Cookie
+			return
+		}
+		labels = append(labels, "filter")
+		http.SetCookie(w, &http.Cookie{Name: "ci_session", Value: "tok", Path: "/"})
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	defer srv.Close()
+
+	s, err := NewSession("test", "test-ua/1.0", 0, 0)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if err := s.SetSortKey(4); err != nil {
+		t.Fatalf("SetSortKey: %v", err)
+	}
+	if err := s.InitFilter(srv.URL, "filter_accreditation[1]=1"); err != nil {
+		t.Fatalf("InitFilter: %v", err)
+	}
+	if err := s.ChangeSort(srv.URL, 9); err == nil {
+		t.Error("ChangeSort(9) seharusnya error")
+	}
+	if err := s.ChangeSort(srv.URL, 2); err != nil {
+		t.Fatalf("ChangeSort (tanpa cookie baru): %v", err)
+	}
+	want := []string{"filter", "sort:4", "sort:2"}
+	if len(labels) != len(want) {
+		t.Fatalf("POST = %v, want %v", labels, want)
+	}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Errorf("POST #%d = %q, want %q", i+1, labels[i], want[i])
+		}
+	}
+	s.mu.Lock()
+	gotKey := s.sortKey
+	s.mu.Unlock()
+	if gotKey != 2 {
+		t.Errorf("sortKey = %d, want 2 (harus ikut diperbarui untuk refresh)", gotKey)
+	}
+
+	// Refresh cookie wajib mengulang sort BARU (2), bukan sort awal (4).
+	s.mu.Lock()
+	s.filterInitAt = time.Now().Add(-cookieRefreshAfter - time.Minute)
+	s.mu.Unlock()
+	if err := s.refreshCookieIfNeeded(); err != nil {
+		t.Fatalf("refreshCookieIfNeeded: %v", err)
+	}
+	want = []string{"filter", "sort:4", "sort:2", "filter", "sort:2"}
+	if len(labels) != len(want) {
+		t.Fatalf("setelah refresh: POST = %v, want %v", labels, want)
+	}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Errorf("POST #%d setelah refresh = %q, want %q", i+1, labels[i], want[i])
+		}
+	}
+}
+
 func TestBuildURL(t *testing.T) {
 	got, err := buildURL("https://contoh.go.id/journals", "sinta=6", 3)
 	if err != nil {

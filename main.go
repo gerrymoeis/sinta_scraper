@@ -39,6 +39,13 @@ func main() {
 	sortKey := flag.Int("sort", 4, "kunci urutan SINTA via POST changesort (tersimpan di sesi; GET ?sort= diabaikan): 1=Impact 2=H5 3=H 4=Citations 5=Citations-5yr | 0=urutan default server (doc 19 Bagian 9)")
 	noDelay := flag.Bool("no-delay", false, "matikan jeda etika global (paksa min-delay=max-delay=0s) — HANYA untuk eksperimen/load-test terkontrol; risiko throttling/blokir ditanggung pengguna")
 	refresh := flag.Bool("refresh", false, "abaikan + wipe checkpoint: semua halaman discrape ulang, perubahan data terdeteksi & dicatat (doc 16)")
+	maxRepairRounds := flag.Int("max-repair-rounds", 6, "batas atas round repair fixpoint; round berhenti lebih awal bila plateau (+0 unik) atau unik==T0 (0 = default 6; -1 = one-pass pass-1 murni tanpa repair, mode ukur eksperimen L4 doc 28)")
+	repairFreeze := flag.Int("repair-freeze", 11, "soft-freeze: halaman 1..N ditahan dari refetch repair sebagai optimasi; otomatis dibuka (thaw) saat plateau lalu berhenti bila tetap +0 (0 = mati; doc 24 Tahap I2)")
+	altSort := flag.Int("alt-sort", 0, "sort alternatif fallback saat plateau repair (POST changesort in-place di sesi hidup): 0 = otomatis (bila -sort=5→s4, selain itu→s5), -1 = mati, 1..5 = eksplisit (sama dengan -sort = mati; doc 24 Tahap I3)")
+	repairRegion := flag.String("repair-region", "kumulatif", "model region repair: kumulatif = dupPages menumpuk dari pass (default, perilaku lama); recompute = dupPages di-reset tiap round, region hanya dari duplikat round terakhir (doc 25 L1)")
+	t0Recheck := flag.Bool("t0-recheck", true, "guard L2: re-check TotalRecords (T0) dengan +1 request saat fixpoint berhenti dgn defisit (plateau/maks-round/tanpa-kandidat) — deteksi perubahan total server di tengah run, bukan blocker round tambahan (doc 26)")
+	recoverKatalog := flag.String("recover-katalog", "", "path db katalog ekspektasi utk publisher recovery (L3): missing ID = katalog \\ run → resolve affiliation_url (offline) → crawl /journals/index/{affid} (kosong = mati; first-run buta dilewati, R9 doc 23; doc 27)")
+	recoverMaxPages := flag.Int("recover-max-pages", 20, "cap total halaman partition selama publisher recovery — backstop, bukan sweep penuh (doc 27)")
 
 	flag.Parse()
 	if *noDelay {
@@ -78,6 +85,36 @@ func main() {
 	if *maxPages < 0 {
 		log.Fatalf("GAGAL: -max-pages harus >= 0 (dapat %d)", *maxPages)
 	}
+	if *maxRepairRounds < -1 {
+		log.Fatalf("GAGAL: -max-repair-rounds harus >= -1 (dapat %d)", *maxRepairRounds)
+	}
+	if *repairFreeze < 0 {
+		log.Fatalf("GAGAL: -repair-freeze harus >= 0 (dapat %d)", *repairFreeze)
+	}
+	if *altSort < -1 {
+		log.Fatalf("GAGAL: -alt-sort harus >= -1 (dapat %d)", *altSort)
+	}
+	if *repairRegion != "kumulatif" && *repairRegion != "recompute" {
+		log.Fatalf("GAGAL: -repair-region harus kumulatif|recompute (dapat %q)", *repairRegion)
+	}
+	if *recoverMaxPages < 0 {
+		log.Fatalf("GAGAL: -recover-max-pages harus >= 0 (dapat %d)", *recoverMaxPages)
+	}
+	// Nilai efektif -alt-sort: 0 = otomatis (paling berdasar data: main s5 →
+	// alt s4 ala Eksperimen D; selain itu → s5 ala Eksperimen A); eksplisit
+	// yang sama dengan -sort dimatikan (ganti sort ke dirinya sendiri = no-op).
+	alt := *altSort
+	if alt == 0 {
+		if *sortKey == 5 {
+			alt = 4
+		} else {
+			alt = 5
+		}
+	}
+	if alt > 0 && *sortKey > 0 && alt == *sortKey {
+		log.Printf("[PERINGATAN] -alt-sort s%d sama dengan -sort — fallback alt dimatikan", alt)
+		alt = 0
+	}
 	if *userAgent == "" {
 		log.Fatalf("GAGAL: -user-agent tidak boleh kosong")
 	}
@@ -97,6 +134,29 @@ func main() {
 	log.Printf("   extraQuery= %q", *extraQuery)
 	log.Printf("   maxPages =   %d", *maxPages)
 	log.Printf("   refresh  =   %v", *refresh)
+	// Nilai efektif -max-repair-rounds: 0 = default 6 (normalisasi sama dengan
+	// pipeline); -1 = one-pass (pass-1 murni; doc 28 L4).
+	repairRounds := *maxRepairRounds
+	if repairRounds == 0 {
+		repairRounds = 6
+	}
+	if repairRounds < 0 {
+		log.Print("   repair   =   ONE-PASS (pass-1 murni tanpa repair/alt-sort; -max-repair-rounds -1, doc 28 L4)")
+	} else {
+		log.Printf("   repair   =   fixpoint, maks %d round, freeze p1..%d (soft; 0 = mati)", repairRounds, *repairFreeze)
+	}
+	log.Printf("   region   =   %s", *repairRegion)
+	log.Printf("   t0-recheck = %v (re-check T0 saat fixpoint berhenti dgn defisit; guard, bukan blocker)", *t0Recheck)
+	if *recoverKatalog != "" {
+		log.Printf("   recover  =   %s (katalog → publisher recovery; cap %d halaman)", *recoverKatalog, *recoverMaxPages)
+	} else {
+		log.Printf("   recover  =   off (tanpa -recover-katalog; first-run buta, L3 mati)")
+	}
+	if alt > 0 {
+		log.Printf("   alt-sort =   s%d (fallback 1+ round saat plateau)", alt)
+	} else {
+		log.Printf("   alt-sort =   mati")
+	}
 	if *noDelay {
 		log.Print("[PERINGATAN] -no-delay AKTIF — jeda etika global DIMATIKAN (0s) untuk semua request.")
 		log.Print("[PERINGATAN] Murni untuk eksperimen/load-test terkontrol; risiko throttling/429/blokir server ditanggung pengguna (doc 14).")
@@ -133,6 +193,17 @@ func main() {
 				log.Fatalf("GAGAL: %v", err)
 			}
 		}
+		// Katalog ekspektasi utk publisher recovery (L3 doc 27) — baca
+		// read-only; gagal buka = GAGAL total (jangan diam-diam jalan tanpa
+		// guard yang diminta user).
+		recoverCatalog := map[int]int{}
+		if *recoverKatalog != "" {
+			recoverCatalog, err = storage.CatalogAffIDsFile(*recoverKatalog, expectedRanks)
+			if err != nil {
+				log.Fatalf("GAGAL: baca katalog -recover-katalog: %v", err)
+			}
+			log.Printf("katalog = %s → %d id→affid (rank %v)", *recoverKatalog, len(recoverCatalog), expectedRanks)
+		}
 		if err := sess.SetSortKey(*sortKey); err != nil {
 			log.Fatalf("GAGAL: -sort: %v", err)
 		}
@@ -140,17 +211,24 @@ func main() {
 		stageStart := time.Now()
 
 		sintaRes, stageErr = sinta.RunSintaStage(sess, store, sinta.StageConfig{
-			BaseURL:       *baseURL,
-			FilterData:    formData,
-			ExtraQuery:    *extraQuery,
-			RunKey:        runKey,
-			Refresh:       *refresh,
-			MaxPages:      *maxPages,
-			Workers:       *workers,
-			MinDelay:      *minDelay,
-			MaxDelay:      *maxDelay,
-			Logf:          log.Printf,
-			ExpectedRanks: expectedRanks,
+			BaseURL:         *baseURL,
+			FilterData:      formData,
+			ExtraQuery:      *extraQuery,
+			RunKey:          runKey,
+			Refresh:         *refresh,
+			MaxPages:        *maxPages,
+			Workers:         *workers,
+			MinDelay:        *minDelay,
+			MaxDelay:        *maxDelay,
+			Logf:            log.Printf,
+			ExpectedRanks:   expectedRanks,
+			MaxRepairRounds: repairRounds,
+			RepairFreeze:    *repairFreeze,
+			AltSort:         alt,
+			RegionMode:      *repairRegion,
+			T0Recheck:       *t0Recheck,
+			RecoverCatalog:  recoverCatalog,
+			RecoverMaxPages: *recoverMaxPages,
 		})
 		stageDur = time.Since(stageStart)
 		if stageErr != nil {
@@ -171,19 +249,26 @@ func main() {
 	payload := map[string]any{
 		"run_id": runID,
 		"config": map[string]any{
-			"stages":     *stages,
-			"rank":       *rank,
-			"year":       *year,
-			"latest-vol": *latestVol,
-			"workers":    *workers,
-			"min-delay":  minDelay.String(),
-			"max-delay":  maxDelay.String(),
-			"max-pages":  *maxPages,
-			"sort":       *sortKey,
-			"no-delay":   *noDelay,
-			"refresh":    *refresh,
-			"base-url":   *baseURL,
-			"user-agent": *userAgent,
+			"stages":            *stages,
+			"rank":              *rank,
+			"year":              *year,
+			"latest-vol":        *latestVol,
+			"workers":           *workers,
+			"min-delay":         minDelay.String(),
+			"max-delay":         maxDelay.String(),
+			"max-pages":         *maxPages,
+			"sort":              *sortKey,
+			"max-repair-rounds": repairRounds,
+			"repair-freeze":     *repairFreeze,
+			"alt-sort":          alt,
+			"repair-region":     *repairRegion,
+			"t0-recheck":        *t0Recheck,
+			"recover-katalog":   *recoverKatalog,
+			"recover-max-pages": *recoverMaxPages,
+			"no-delay":          *noDelay,
+			"refresh":           *refresh,
+			"base-url":          *baseURL,
+			"user-agent":        *userAgent,
 		},
 		"env": map[string]any{
 			"go":      runtime.Version(),
@@ -231,11 +316,11 @@ func main() {
 		verif := "dilewati"
 		switch {
 		case sintaRes.Verified:
-			verif = "OK"
+			verif = "VERIFIED_COMPLETE"
 		case strings.HasPrefix(sintaRes.VerifyMsg, "GAGAL-FILTER"):
 			verif = "GAGAL-FILTER"
-		case strings.HasPrefix(sintaRes.VerifyMsg, "UNRESOLVED"):
-			verif = "UNRESOLVED"
+		case strings.HasPrefix(sintaRes.VerifyMsg, "INCOMPLETE"):
+			verif = "INCOMPLETE"
 		case strings.HasPrefix(sintaRes.VerifyMsg, "GAGAL"):
 			verif = "GAGAL"
 		}
@@ -245,7 +330,18 @@ func main() {
 			sintaRes.JournalsSaved, sintaRes.JournalsNew, sintaRes.JournalsUpdated, sintaRes.JournalsUnchanged,
 			sintaRes.TotalRecords, sintaRes.UniqueIDs, verif)
 		if sintaRes.RepairRounds > 0 {
-			log.Printf("[RINGKASAN] repair   : %d round, %d halaman di-refetch", sintaRes.RepairRounds, sintaRes.RepairPages)
+			log.Printf("[RINGKASAN] repair   : %d round, %d halaman di-refetch | berhenti: %s | region %s",
+				sintaRes.RepairRounds, sintaRes.RepairPages, sintaRes.RepairStop, *repairRegion)
+		}
+		if sintaRes.AltRounds > 0 {
+			log.Printf("[RINGKASAN] alt-sort : s%d dipakai %d round setelah plateau", alt, sintaRes.AltRounds)
+		}
+		if sintaRes.T0Recheck != "" {
+			log.Printf("[RINGKASAN] t0-recheck: %s", sintaRes.T0Recheck)
+		}
+		if sintaRes.RecoveryMissing > 0 {
+			log.Printf("[RINGKASAN] recovery : %d missing dari katalog → %d partisi, %d halaman, %d ketemu",
+				sintaRes.RecoveryMissing, sintaRes.RecoveryPartisi, sintaRes.RecoveryPages, sintaRes.RecoveryFound)
 		}
 		if !sintaRes.Verified && sintaRes.VerifyMsg != "" {
 			log.Printf("[RINGKASAN] verifikasi detail: %s", sintaRes.VerifyMsg)
