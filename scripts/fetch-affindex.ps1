@@ -1,7 +1,7 @@
-# Scrape penuh indeks affiliations SINTA (id|nama) ke data/affindex.tsv.
+# Scrape penuh indeks affiliations SINTA (id|nama) ke data/stage1/affindex.tsv.
 # Alat bantu Eksperimen C (doc 22): peta nama->id untuk resolusi publisher
 # tanpa link profil pada kartu. Polite: 1 request / ~1,2 dtk.
-$out = 'data\affindex.tsv'
+$out = 'data\stage1\affindex.tsv'
 $done = @{}
 if (Test-Path $out) { Get-Content $out | ForEach-Object { $f = $_ -split "`t"; if ($f.Count -ge 2) { $done[$f[0]] = $true } } }
 "lanjut dari $($done.Count) baris existing"

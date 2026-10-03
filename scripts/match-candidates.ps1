@@ -1,8 +1,8 @@
 # Pencocokan nama affiliation tanpa-link -> id profil (Eksperimen C, doc 22).
 # Skor: 100=eknak norm, 80=profil mengandung nama kartu, 60+=token overlap >=0.6.
-# Output: data/r6-match.tsv (review) + data/r6-candids.txt (id unik per baris).
+# Output: data/stage1/r6-match.tsv (review) + data/stage1/r6-candids.txt (id unik per baris).
 $map = @{}
-Get-Content data\affindex.tsv | ForEach-Object {
+Get-Content data\stage1\affindex.tsv | ForEach-Object {
     $f = $_ -split "`t", 2
     if ($f.Count -eq 2) { $map[$f[0]] = $f[1] }
 }
@@ -20,7 +20,7 @@ function Tokens([string]$s) {
 }
 
 $targets = @()
-Get-Content data\r6-missing-detail.txt | ForEach-Object {
+Get-Content data\stage1\r6-missing-detail.txt | ForEach-Object {
     if ($_ -match '^(\d+)\s*\|\s*(.+?)\s*\|') {
         $targets += [pscustomobject]@{ id = [int]$Matches[1]; name = $Matches[2] }
     }
@@ -29,7 +29,7 @@ $targets += [pscustomobject]@{ id = 18411; name = 'YAYASAN NUSANTARA CHILDREN OF
 $targets += [pscustomobject]@{ id = 18544; name = 'YAYASAN YPMMA' }
 "targets: $($targets.Count)"
 
-$report = 'data\r6-match.tsv'
+$report = 'data\stage1\r6-match.tsv'
 "target_id`tname`tncands`tcandidates" | Set-Content -Encoding utf8 $report
 $candSet = @{}
 foreach ($t in $targets) {
@@ -56,7 +56,7 @@ foreach ($t in $targets) {
     $cstr = ($top | ForEach-Object { "$($_.id):$($_.score):$($_.name)" }) -join ' ;; '
     "$($t.id)`t$($t.name)`t$($top.Count)`t$cstr" | Add-Content -Encoding utf8 $report
 }
-($candSet.Keys | Sort-Object) -join "`n" | Set-Content -Encoding ascii data\r6-candids.txt
+($candSet.Keys | Sort-Object) -join "`n" | Set-Content -Encoding ascii data\stage1\r6-candids.txt
 "kandidat unik: $($candSet.Count)"
 "== tanpa kandidat =="
 Get-Content $report | ForEach-Object { $f = $_ -split "`t"; if ($f.Count -ge 3 -and $f[2] -eq '0') { "$($f[0]) | $($f[1])" } }

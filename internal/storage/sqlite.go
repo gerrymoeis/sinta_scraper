@@ -62,6 +62,76 @@ CREATE TABLE IF NOT EXISTS scrape_progress (
 );
 
 CREATE INDEX IF NOT EXISTS idx_journals_ojs_status ON journals (ojs_status);
+
+-- ============================================================
+-- Tahap 2 — Garuda Enrichment & Source Resolver (doc 30 rev.3).
+-- Semua IF NOT EXISTS → idempoten pada db lama & baru (Q1 Langkah 1).
+-- journals TIDAK disentuh (IMMUTABLE) — tabel-tabel baru hanya
+-- merujuk journals.id.
+-- ============================================================
+
+-- 3.1 hasil matching + enrichment Garuda; provenance = JSON per-field
+-- {value, source, retrieved_at, confidence} (keputusan Q1, Opsi A) —
+-- hanya boleh ditulis lewat MergeProvenance (provenance.go).
+CREATE TABLE IF NOT EXISTS journal_enrichment (
+	journal_id                 INTEGER PRIMARY KEY REFERENCES journals(id),
+	garuda_id                  INTEGER,
+	garuda_url                 TEXT,
+	garuda_title               TEXT,
+	garuda_publisher           TEXT,
+	garuda_pissn               TEXT,
+	garuda_eissn               TEXT,
+	garuda_subject             TEXT,
+	garuda_original_source_url TEXT,
+	garuda_source_url          TEXT,
+	matched_by                 TEXT,
+	match_confidence           REAL,
+	match_status               TEXT,
+	garuda_retrieved_at        TEXT,
+	provenance                 TEXT NOT NULL DEFAULT '{}',
+	subject_area_canonical     TEXT,
+	UNIQUE(garuda_id)
+);
+
+-- 3.2 semua kandidat URL dari semua sumber (TIDAK ditimpa; pemilihan
+-- canonical = tugas resolver Fase 3 — keputusan Q5, rev.3).
+CREATE TABLE IF NOT EXISTS journal_urls (
+	id           INTEGER PRIMARY KEY,
+	journal_id   INTEGER NOT NULL REFERENCES journals(id),
+	url          TEXT    NOT NULL,
+	kind         TEXT    NOT NULL,
+	source       TEXT    NOT NULL,
+	confidence   REAL,
+	http_status  INTEGER,
+	final_url    TEXT,
+	checked_at   TEXT,
+	is_canonical INTEGER DEFAULT 0,
+	UNIQUE(journal_id, kind, url)
+);
+
+-- 3.3 profil sumber resmi: platform terdeteksi berbasis KONTEN
+-- (detection_evidence wajib diisi) — diisi Fase 3.
+CREATE TABLE IF NOT EXISTS journal_source_profile (
+	journal_id          INTEGER PRIMARY KEY REFERENCES journals(id),
+	platform            TEXT NOT NULL,
+	canonical_url       TEXT,
+	oai_url             TEXT,
+	article_index       TEXT,
+	article_url_pattern TEXT,
+	policy_urls         TEXT,
+	pdf_strategy        TEXT,
+	detection_evidence  TEXT,
+	detected_at         TEXT
+);
+
+-- 3.4 resume/state per-jurnal Tahap 2 (pola checkpoint terbukti).
+CREATE TABLE IF NOT EXISTS phase2_progress (
+	journal_id INTEGER PRIMARY KEY REFERENCES journals(id),
+	phase      TEXT NOT NULL,
+	flags      TEXT DEFAULT '{}',
+	updated_at TEXT NOT NULL,
+	last_error TEXT
+);
 `
 
 type Store struct {
