@@ -8,9 +8,11 @@ import (
 	"testing"
 )
 
-// tahap2Tables = 4 tabel Tahap 2 yang wajib dibuat oleh DDL (doc 30 §3).
+// tahap2Tables = tabel Tahap 2 yang wajib dibuat oleh DDL (doc 30 §3;
+// subject_map ditambahkan Q3 — §13.3).
 var tahap2Tables = []string{
 	"journal_enrichment", "journal_urls", "journal_source_profile", "phase2_progress",
+	"subject_map",
 }
 
 // daftarTabelQuery mengembalikan set nama tabel di sebuah db.

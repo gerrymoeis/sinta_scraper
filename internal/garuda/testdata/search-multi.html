@@ -1,0 +1,651 @@
+
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+        <meta name="description" content="garuda garba rujukan digital">
+        <meta name="author" content="kementrian riset, teknologi dan pendidikan tinggi">
+        <link rel="icon" href="/assets/img/garuda-icon.png">
+
+        <title>Garuda - Garba Rujukan Digital</title>
+
+        <!-- SEMANTIC UI -->
+        <link href="/assets/semantic/semantic.min.css" rel="stylesheet">
+        <link href="/assets/semantic/components/reset.css" rel="stylesheet"> 
+
+        <link href="/assets/css/main.css" rel="stylesheet">
+        <link href="/assets/css/app.css" rel="stylesheet">
+        <link href="/assets/css/flash-message.css" rel="stylesheet">
+        
+        <!-- JQUERY UI - AUTOCOMPLETE -->
+        <link href="/assets/css/jquery-ui/jquery-ui.css" rel="stylesheet" />
+
+        <script src="/assets/js/jquery.js"></script>
+        <script src="/assets/semantic/semantic.min.js"></script>
+        <script src="/assets/js/jquery.tagcloud.js" type="text/javascript"></script>
+        <script src="/assets/js/Chart.js"></script>
+        <script src="/assets/custom/main.js"></script>
+        <script src="/assets/js/app.js"></script>
+        <!-- JQUERY UI - AUTOCOMPLETE -->
+        <script src="/assets/js/jquery-ui/jquery-ui.min.js"></script>
+    </head>
+
+
+
+    <body>
+                <div class="ui stackable menu top-menu">
+            <a class="header item brand" href="/">
+                 <img src="/assets/img/garuda1.png" alt=""> 
+            </a>
+            <div class="right menu">
+                <a class="nav item " href="/">Home</a>
+                <a class="nav item " href="/publisher">Publisher</a>
+                <a class="nav item active" href="/journal">Journal / Conference</a>
+                <a class="nav item " href="/area">Subject</a>
+                <a class="nav item " href="/suggest">Suggest</a>
+                <a class="nav item" target="_blank" href="https://drive.google.com/drive/folders/19TuyOLkABcMgh99AgLweV-B8BE1wcUl8?usp=sharing">Guidebook</a>
+                <a class="nav item disabled">&nbsp;</a>
+            </div>
+        </div>
+
+        <main role="main" class="container">
+
+
+<div class="clearfix"></div>
+<div class="ui grid stackable stat-box">
+    <div class="column red five wide right aligned title-stat">
+        Journals/Conference
+    </div>
+    <div class="column five wide"></div>
+    <div class="column six wide center aligned">
+        <div class="ui orange horizontal statistic">
+            <div class="value">
+                15,957            </div>
+            <div class="label">
+                Journals
+            </div>
+        </div>
+    </div>
+</div>
+<div class="ui stackable grid content-wrapper">
+    <div class="eleven wide column centered">
+        <div class="ui segment">
+            <div class="ui equal width grid">
+                <div class="column">                    
+                    <form id="form-journal" class="ui form mini search-pub-form"  action="" method="GET">
+                        <div class="inline fields">                            
+                            <div class="fourteen wide field">
+                                <input type="text" name="q" placeholder="Journal Name, Abbrev, ISSN, EISSN" value="jurnal" minlength="3" required>
+                            </div>
+                            <div class="two wide field">
+                                <button class="ui icon button mini red" type="submit"><i class="icon search"></i></button>
+                            </div>
+                            <!-- <a class="ui icon button mini red" id="adv-btn">More</a> -->
+                        </div>
+                    </form>                  
+                </div>
+                <div class="column right aligned">
+                                            <a href="?page=1&q=jurnal" class="ui mini icon button">
+                            <i class="angle double left icon"></i>
+                        </a>                                
+                                                    <a href="?page=1&q=jurnal" class="ui mini icon button red">
+                                &nbsp;1&nbsp;
+                            </a>
+                                                    <a href="?page=2&q=jurnal" class="ui mini icon button ">
+                                &nbsp;2&nbsp;
+                            </a>
+                                                    <a href="?page=3&q=jurnal" class="ui mini icon button ">
+                                &nbsp;3&nbsp;
+                            </a>
+                                                    <a href="?page=4&q=jurnal" class="ui mini icon button ">
+                                &nbsp;4&nbsp;
+                            </a>
+                                                    <a href="?page=5&q=jurnal" class="ui mini icon button ">
+                                &nbsp;5&nbsp;
+                            </a>
+                                                    
+                        <a href="?page=1596&q=jurnal" class="ui mini icon button page-button">
+                            <i class="angle double right icon"></i>
+                        </a>
+                        <a class="mini ui icon button red alpha-filter-btn">
+                            <i class="icon filter"></i><i class="icon sort alphabet ascending"></i>
+                        </a>
+                                    </div>
+            </div>
+            
+            <!-- <div id="adv-box" style="display: none;">
+                <div class="ui divider"></div>
+                <span><b></b></span>
+                <form class="ui form mini search-pub-form" action="" method="GET">
+                    <label for="">Advance Search</label>
+                    <div class="inline fields">
+                        <div class="nine wide field">
+                            <input type="text" name="q" placeholder="Journal Name" value="jurnal" minlength="3" required>
+                        </div>
+                        <div class="four wide field">
+                            <input type="text" name="pub" placeholder="Publisher" value="" minlength="3" required>
+                        </div>
+                        <div class="two wide field">
+                            <button class="ui button mini red" type="submit">Search</button>
+                        </div>
+                        <div class="one wide field">
+                            <a class="ui icon button mini red" id="adv-less">Less</a>
+                        </div>
+                    </div>
+                </form>
+            </div> -->
+
+            <div class="ui divider"></div>
+            <div class="ui circular labels alpha-filter">
+                <a class="ui label " href="/journal?alfa=A">A</a>
+                <a class="ui label " href="/journal?alfa=B">B</a>
+                <a class="ui label " href="/journal?alfa=C">C</a>
+                <a class="ui label " href="/journal?alfa=D">D</a>
+                <a class="ui label " href="/journal?alfa=E">E</a>
+                <a class="ui label " href="/journal?alfa=F">F</a>
+                <a class="ui label " href="/journal?alfa=G">G</a>
+                <a class="ui label " href="/journal?alfa=H">H</a>
+                <a class="ui label " href="/journal?alfa=I">I</a>
+                <a class="ui label " href="/journal?alfa=J">J</a>
+                <a class="ui label " href="/journal?alfa=K">K</a>
+                <a class="ui label " href="/journal?alfa=L">L</a>
+                <a class="ui label " href="/journal?alfa=M">M</a>
+                <a class="ui label " href="/journal?alfa=N">N</a>
+                <a class="ui label " href="/journal?alfa=O">O</a>
+                <a class="ui label " href="/journal?alfa=P">P</a>
+                <a class="ui label " href="/journal?alfa=Q">Q</a>
+                <a class="ui label " href="/journal?alfa=R">R</a>
+                <a class="ui label " href="/journal?alfa=S">S</a>
+                <a class="ui label " href="/journal?alfa=T">T</a>
+                <a class="ui label " href="/journal?alfa=U">U</a>
+                <a class="ui label " href="/journal?alfa=V">V</a>
+                <a class="ui label " href="/journal?alfa=W">W</a>
+                <a class="ui label " href="/journal?alfa=X">X</a>
+                <a class="ui label " href="/journal?alfa=Y">Y</a>
+                <a class="ui label " href="/journal?alfa=Z">Z</a>
+                <a class="ui label red" href="/journal">Show All</a>
+            </div>
+
+            
+                            <div class="ui message tiny orange">
+                    Search results for <b>"<xmp>jurnal</xmp>"</b>
+                     : <b>15,957</b> Journals / Conference found 
+                    <a class="" style="float: right" href="/journal/" ><i class="remove circle icon"></i>clear</a>       
+                </div>
+            
+            <div class="ui divider"></div>
+
+            <table class="ui very basic table">
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=46623&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/46623">
+                                    <xmp> EDELWEISS: Jurnal Pengabdian Masyarakat</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/46623" >
+                                    <xmp>Universitas Teknologi Muhammadiyah Jakarta</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp></xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>-</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>-</xmp>
+                                </a>
+                                <br>
+                                                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=30709&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/30709">
+                                    <xmp>"JAMASTIKA" Jurnal Mahasiswa Teknik Informatika</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/30709" >
+                                    <xmp>Universitas Ngudi Waluyo</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>-</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>28097521</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/60"><xmp>Computer Science & IT</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=18891&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/18891">
+                                    <xmp>'A Jamiy: Jurnal Bahasa dan Sastra Arab</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/18891" >
+                                    <xmp>Universitas Muhammadiyah Gorontalo</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>22529926</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>26572206</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/97"><xmp>Education</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/135"><xmp>Languange, Linguistic, Communication & Media</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=14872&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/14872">
+                                    <xmp>'Anil Islam: Jurnal Kebudayaan dan Ilmu Keislaman</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/14872" >
+                                    <xmp>Institut Ilmu Keislaman Annuqayah Guluk-Guluk Sumenep</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>20854080</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>25287532</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/97"><xmp>Education</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=18319&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/18319">
+                                    <xmp>'Arabiyya: Jurnal Studi Bahasa Arab</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/18319" >
+                                    <xmp>Sekolah Tinggi Agama Islam Negeri Teungku Dirundeng Meulaboh</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>23384964</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>2615238X</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/97"><xmp>Education</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/135"><xmp>Languange, Linguistic, Communication & Media</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=31801&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/31801">
+                                    <xmp>'Asabiyah: Jurnal Pengabdian Hukum</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/31801" >
+                                    <xmp>Universitas Muhammadiyah Palembang</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>-</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>3021730X</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/137"><xmp>Law, Crime, Criminology & Criminal Justice</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/190"><xmp>Social Sciences</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=47833&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/47833">
+                                    <xmp>'Ibadatuna: Jurnal Pengabdian Masyarakat (PM)</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/47833" >
+                                    <xmp>Institut Agama Islam Miftahul Ulum Lumajang</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>28098161</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>28097084</xmp>
+                                </a>
+                                <br>
+                                                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=979&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/979">
+                                    <xmp>(JELIKU) Jurnal Elektronik Ilmu Komputer Udayana</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/979" >
+                                    <xmp>Universitas Udayana</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>23015373</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>26545101</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/60"><xmp>Computer Science & IT</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=14785&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/14785">
+                                    <xmp>(JRAMB) Jurnal Riset Akuntansi Mercu Buana</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/14785" >
+                                    <xmp>Universitas Mercu Buana Yogyakarta</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>24601233</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>25484338</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/95"><xmp>Economics, Econometrics & Finance</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                                    <tr>
+                        <td width="80" valign="top">
+                            <a class="ui image rounded left floated item-img">
+                                <img class="ui image rounded bg" width="75" src="/imageview/journal?id=42113&size=m" alt="cover" />
+                            </a>
+                        </td>
+                        <td valign="top">
+                            <div>
+                                <a class="title-journal" href="/journal/view/42113">
+                                    <xmp>(JRSIKOM) Jurnal Riset Sistem Informasi dan Aplikasi Komputer</xmp>
+                                </a>
+                            </div>
+                            <div>
+                                <a class="subtitle-journal" href="/journal/view/42113" >
+                                    <xmp>Siantar Codes Academy</xmp> 
+                                </a>
+                                <br>
+                                <a class="subtitle-journal">
+                                    <xmp>JOURNAL</xmp>&nbsp;&nbsp;&nbsp;
+                                    ISSN : <xmp>-</xmp> &nbsp;&nbsp;&nbsp;
+                                    EISSN : <xmp>3090076X</xmp>
+                                </a>
+                                <br>
+                                                                                                    <a class="ui label mini label-journal" href="/area/index/60"><xmp>Computer Science & IT</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/70"><xmp>Control & Systems Engineering</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/97"><xmp>Education</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/100"><xmp>Electrical & Electronics Engineering</xmp></a>
+                                                                    <a class="ui label mini label-journal" href="/area/index/150"><xmp>Mathematics</xmp></a>
+                                                            </div>
+                        </td>
+                    </tr>
+                    
+                    <div class="clearfix"></div>
+                            </table>
+            
+
+                            <div class="ui divider"></div>
+                <div class="ui two column stackable grid">
+                    <div class="column">
+                        <p class="pagination-info">
+                            Page 1 of 1596                            | Total Record : 15957 
+                        </p>
+                    </div>
+                    <div class="column">
+                                                    <div class="page-column"  style="float: right !important;">
+                                <a href="?page=1&q=jurnal" class="ui mini icon button">
+                                    <i class="angle double left icon"></i>
+                                </a>                                
+                                                                    <a href="?page=1&q=jurnal" class="ui mini icon button red">
+                                        &nbsp;1&nbsp;
+                                    </a>
+                                                                    <a href="?page=2&q=jurnal" class="ui mini icon button ">
+                                        &nbsp;2&nbsp;
+                                    </a>
+                                                                    <a href="?page=3&q=jurnal" class="ui mini icon button ">
+                                        &nbsp;3&nbsp;
+                                    </a>
+                                                                    <a href="?page=4&q=jurnal" class="ui mini icon button ">
+                                        &nbsp;4&nbsp;
+                                    </a>
+                                                                    <a href="?page=5&q=jurnal" class="ui mini icon button ">
+                                        &nbsp;5&nbsp;
+                                    </a>
+                                                            
+                                <a href="?page=1596&q=jurnal" class="ui mini icon button">
+                                    <i class="angle double right icon"></i>
+                                </a>
+
+                                <a class="circular mini ui icon button right floated scroll-top">
+                                    <i class="icon arrow circle up"></i>
+                                </a>
+                            </div>                        
+                                            </div>
+                </div>
+                <br>
+                    </div>
+    </div>
+</div>
+</div><!-- </div> -->
+</main>
+
+<div class="links-box">
+    <ul>
+        <li><a href="https://sinta.kemdiktisaintek.go.id" target="_blank">Sinta</a></li>
+        <li><a title="Basis Informasi Penelitian dan Pengabdian kepada Masyarakat" href="https://bima.kemdiktisaintek.go.id" target="_blank">Bima</a></li>
+        <li><a title="Akreditasi Jurnal Nasional" href="https://arjuna.kemdiktisaintek.go.id" target="_blank">Arjuna</a></li>
+        <li><a title="Pangkalan Data Pendidikan Tinggi Ristekdikti" href="https://pddikti.kemdiktisaintek.go.id" target="_blank">PDDIKTI</a></li>
+        <li><a title="Data Riset dan Pengembangan Ristekdikti" href="https://dikti.kemdiktisaintek.go.id/" target="_blank">Risbang</a></li>
+        <li><a title="The Largest Abstract and Citation Database of Peer-Reviewed Literature" href="https://www.scopus.com" target="_blank">Scopus</a></li>
+        <li><a title="Repositori Tugas Akhir Mahasiswa" href="https://rama.kemdiktisaintek.go.id/" target="_blank">Rama</a></li>
+    </ul>
+</div>
+<footer class="ui grid equal width footer">
+    <div class="clearfix"></div>
+    <div class="column">
+        <img src="/assets/img/logo_dikbud.png" />
+        <div class="footer-company">Kementerian Pendidikan, Kebudayaan, Riset, dan Teknologi </div>
+        <div class="footer-subcompany">(The Ministry of Education, Culture, Research, and Technology)</div>
+        <div class="footer-copyright">&copy; 2018</div>
+    </div>
+    <div class="column"></div>
+</footer>
+<!-- UI KIT -->
+
+
+
+
+<script>
+    setTimeout(function() {
+        // $('#flash_message').slideUp( 300, "linear" );
+        $('#flash_message').fadeOut( "slow");
+    }, 2000);
+</script>
+<!-- AUTOSEARCH BUKU-->
+<script>
+    $(function() {
+        $("#suggest_pub").autocomplete({
+            source: "/suggest/findPublisher",
+            select: function( event, ui ) {
+                event.preventDefault();
+                $("#suggest_pub").val(ui.item.value);
+            }
+        });
+    });
+</script>
+<!-- END AUTOSEARCH BUKU-->
+
+
+<script type="text/javascript">
+    $('.ui.checkbox').checkbox();
+    $('select.dropdown').dropdown();
+    $('.ui.dropdown').dropdown();
+    $('.top.menu .item').tab();
+
+    $(document).ready(function () {
+
+        $("#sort").change(function () {
+            var page = 1;
+            // $("#sort").val(page);
+            $("#form_sort").submit();
+        });
+
+        $("#select_item").change(function () {
+            var page = 1;
+            $("#page").val(page);
+            $("#form_journal").submit();
+        });        
+
+        $("#select_item").change(function () {
+            var page = 1;
+            $("#page").val(page);
+            $("#form_alphabeth").submit();
+        });
+
+        $("#select_item").change(function () {
+            var page = 1;
+            $("#page").val(page);
+            $("#form_search").submit();
+        });
+
+        $('#page').keydown(function () {
+            var key = e.which;
+            if (key == 13) {
+                $('#form_journal').submit();
+            }
+        });
+
+        $('#form_journal').keydown(function () {
+            var key = e.which;
+            if (key == 13) {
+                // As ASCII code for ENTER key is "13"
+                $('#form_journal').submit(); // Submit form code
+            }
+        });
+
+        $('.demo.menu .item').tab({history: false});
+
+        $('.area-cloud a').tagcloud();
+
+    });
+
+    $('.ui.top.attached.tabular.menu .item').tab({history: false});
+
+    $.fn.tagcloud.defaults = {
+        size: {start: 9, end: 30, unit: 'pt'},
+        color: {start: '#444', end: '#ed462f'}
+    };
+
+    function show_abstract(id){
+        $('#show_abstract'+id).slideToggle();
+    }
+
+    $(document).ready(function () {
+        $('#adv-btn').on('click', function () {
+            $('#adv-box').slideToggle('slow');
+            $('#form-journal').slideToggle('slow');
+        });
+
+        $('#adv-less').on('click', function () {
+            $('#adv-box').slideToggle('slow');
+            $('#form-journal').slideToggle('slow');
+        });
+    });
+
+
+
+</script>
+
+</body>
+</html>

@@ -132,6 +132,25 @@ CREATE TABLE IF NOT EXISTS phase2_progress (
 	updated_at TEXT NOT NULL,
 	last_error TEXT
 );
+
+-- 3.6 kamus subject (Q3, doc 30 §13.3): term sumber → kanonik. DIBUAT
+-- DARI SUMBER (harvest vocab SINTA dari DB + Garuda dari /area), BUKAN
+-- const Go — dibangun ulang idempoten tiap run bila taxonomy berubah.
+-- method: exact|contain|prefix|identity (merge co-occur DICABUT rev.2);
+-- support = # jurnal run sbg bukti; confidence 0..1 (K2).
+CREATE TABLE IF NOT EXISTS subject_map (
+	id             INTEGER PRIMARY KEY,
+	source_system  TEXT NOT NULL,              -- 'sinta' | 'garuda'
+	source_term    TEXT NOT NULL,              -- label RAW asli (K1)
+	source_key     TEXT NOT NULL,              -- kunci fold utk join deterministik
+	canonical_term TEXT NOT NULL,              -- representatif (terpanjang, seri → alfabet)
+	method         TEXT NOT NULL,              -- exact|contain|prefix|identity
+	support        INTEGER NOT NULL DEFAULT 0, -- bukti co-occurrence di run
+	confidence     REAL NOT NULL DEFAULT 0,    -- 0..1 (K2)
+	origin         TEXT NOT NULL,              -- 'harvest' (vocab) | 'computed' (alignment)
+	built_at       TEXT NOT NULL,
+	UNIQUE(source_system, source_key)
+);
 `
 
 type Store struct {
