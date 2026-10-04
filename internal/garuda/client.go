@@ -81,3 +81,8 @@ func SearchURL(q string, page int) string {
 
 // AreaURL = halaman taxonomi /area (1 GET utk 40 label).
 const AreaURL = "https://garuda.kemdiktisaintek.go.id/area"
+
+// ViewURL = halaman detail jurnal Garuda /journal/view/{N} (E3/Q4).
+func ViewURL(garudaID int) string {
+	return fmt.Sprintf("https://garuda.kemdiktisaintek.go.id/journal/view/%d", garudaID)
+}

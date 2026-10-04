@@ -66,7 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_journals_ojs_status ON journals (ojs_status);
 -- ============================================================
 -- Tahap 2 — Garuda Enrichment & Source Resolver (doc 30 rev.3).
 -- Semua IF NOT EXISTS → idempoten pada db lama & baru (Q1 Langkah 1).
--- journals TIDAK disentuh (IMMUTABLE) — tabel-tabel baru hanya
+-- Enrichment tidak menulis journals (sinkronisasi Tahap 2 → journals
+-- = E7; AMENDMEN K1/K5, doc 30 Bagian 0) — tabel-tabel baru hanya
 -- merujuk journals.id.
 -- ============================================================
 
@@ -90,6 +91,8 @@ CREATE TABLE IF NOT EXISTS journal_enrichment (
 	garuda_retrieved_at        TEXT,
 	provenance                 TEXT NOT NULL DEFAULT '{}',
 	subject_area_canonical     TEXT,
+	garuda_home_url            TEXT, -- link "Home Page" halaman view/N (E3, Opsi A — doc 31 §4)
+	garuda_oai_url             TEXT, -- link "OAI Link" halaman view/N (E3, Opsi A — doc 31 §4)
 	UNIQUE(garuda_id)
 );
 
@@ -195,7 +198,37 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("gagal migrasi hapus kolom university: %w", err)
 	}
 
+	// Q4 E3 (doc 31 §4 Opsi A): 2 kolom link halaman view — db kerja Tahap 2
+	// dibuat sebelum E3 → kolom ditambahkan lewat ALTER (idempoten; db baru
+	// sudah punya kolomnya lewat CREATE TABLE).
+	if err := addQ4ViewColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("gagal migrasi kolom view E3: %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// addQ4ViewColumns menambah garuda_home_url & garuda_oai_url ke
+// journal_enrichment bila belum ada (migrasi ALTER idempoten utk db kerja
+// yang dibuat sebelum E3; doc 31 §4 Opsi A).
+func addQ4ViewColumns(db *sql.DB) error {
+	for _, col := range []string{"garuda_home_url TEXT", "garuda_oai_url TEXT"} {
+		name := strings.Fields(col)[0]
+		var n int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('journal_enrichment') WHERE name = ?`,
+			name,
+		).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec(`ALTER TABLE journal_enrichment ADD COLUMN ` + col); err != nil {
+				return fmt.Errorf("ALTER %s: %w", name, err)
+			}
+		}
+	}
+	return nil
 }
 
 // dropLegacyUniversityColumn membuang kolom `university` dari tabel

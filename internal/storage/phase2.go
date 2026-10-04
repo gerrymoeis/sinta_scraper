@@ -9,7 +9,8 @@ import (
 
 // Fungsi Tahap 2 (Q3 — doc 30 §13.4 langkah 4–5): target harvest, resume
 // phase2_progress, capture baris search, rebuild subject_map, dan hasil
-// harmonisasi. journals TIDAK disentuh (IMMUTABLE).
+// harmonisasi. journals tidak ditulis oleh fase enrichment ini (sinkronisasi
+// Tahap 2 → journals = E7; AMENDMEN K1/K5, doc 30 Bagian 0).
 
 // HarvestTarget = baris input harvest (dari journals — baca saja).
 type HarvestTarget struct {

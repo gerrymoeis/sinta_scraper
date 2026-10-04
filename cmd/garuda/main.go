@@ -4,16 +4,20 @@
 //
 //	-probe : probe 10 E-ISSN campuran (pembuka E1) — read-only, tanpa tulis DB,
 //	         HTML disimpan sbg fixture (§13.5). Q3 langkah 3.
-//	-subjects : harvest subject 261 → build subject_map → harmonisasi (Q3 langkah 4–5).
+//	-subjects : harvest subject 261 → build subject_map + harmonisasi (Q3 langkah 4–5).
+//	-view : probe halaman view/N campuran (Q4 E3) — fixture view-{id}.html, read-only.
+//	-view-fill : isi garuda_home_url/garuda_oai_url dari fixture view (E3 Opsi A).
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +34,8 @@ func main() {
 	fixtures := flag.String("fixtures", "data/stage2/fixtures", "dir simpan HTML mentah")
 	probe := flag.Bool("probe", false, "probe 10 E-ISSN campuran (E1-subset), read-only")
 	subjects := flag.Bool("subjects", false, "harvest subject + build subject_map + harmonisasi")
+	view := flag.Bool("view", false, "probe halaman view/N campuran (E3) — simpan fixture, read-only")
+	viewFill := flag.Bool("view-fill", false, "isi garuda_home_url/garuda_oai_url dari fixture view (E3 Opsi A) — tulis 2 kolom saja")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -45,6 +51,20 @@ func main() {
 	if *subjects {
 		if err := runSubjects(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
 			fmt.Fprintf(os.Stderr, "subjects GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *view {
+		if err := runView(*dbPath, *fixtures, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "view GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *viewFill {
+		if err := runViewFill(*dbPath, *fixtures); err != nil {
+			fmt.Fprintf(os.Stderr, "view-fill GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -112,6 +132,287 @@ func runSubjects(dbPath, fixturesDir string, refresh bool, delayMin, delayMax ti
 	}
 	fmt.Printf("method: exact=%d contain=%d prefix=%d identity=%d | merge support=0: %d\n",
 		dist["exact"], dist["contain"], dist["prefix"], dist["identity"], support0)
+	return nil
+}
+
+// ---------- Q4 E3 (doc 30 Bagian 14 §14.2) ----------
+
+// viewKasus = satu URL halaman view/N utk probe E3.
+type viewKasus struct {
+	label string
+	url   string
+}
+
+var reViewPath = regexp.MustCompile(`/journal/view/(\d+)`)
+
+// reFixtureView mencocokkan nama file fixture view-{id}.html (bukan URL).
+var reFixtureView = regexp.MustCompile(`^view-(\d+)\.html$`)
+
+// idDariURL mengekstrak garuda_id dari URL /journal/view/N.
+func idDariURL(u string) (int, error) {
+	m := reViewPath.FindStringSubmatch(u)
+	if m == nil {
+		return 0, fmt.Errorf("bukan URL view/N: %s", u)
+	}
+	return strconv.Atoi(m[1])
+}
+
+// kumpulView menjalankan satu query sampling (URL kosong di-skip) utk daftar E3.
+func kumpulView(db *sql.DB, query, label string, daftar *[]viewKasus) error {
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Errorf("query %s: %w", label, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return fmt.Errorf("scan %s: %w", label, err)
+		}
+		if u != "" {
+			*daftar = append(*daftar, viewKasus{label: label, url: u})
+		}
+	}
+	return rows.Err()
+}
+
+// idDariFixtureSearch mengambil garuda_id kandidat PERTAMA dari fixture
+// search jurnal (ambiguous tak menyimpan garuda_id di DB — kandidatnya tetap
+// ada offline di fixture hasil Q3, nol request).
+func idDariFixtureSearch(fixturesDir string, journalID int64) (int, error) {
+	matches, err := filepath.Glob(filepath.Join(fixturesDir, fmt.Sprintf("search-j%d-*.html", journalID)))
+	if err != nil || len(matches) == 0 {
+		return 0, fmt.Errorf("fixture search j%d tak ada", journalID)
+	}
+	b, err := os.ReadFile(matches[0])
+	if err != nil {
+		return 0, err
+	}
+	page, err := garuda.ParseSearchPage(strings.NewReader(string(b)))
+	if err != nil {
+		return 0, fmt.Errorf("parse fixture j%d: %w", journalID, err)
+	}
+	if len(page.Rows) == 0 {
+		return 0, fmt.Errorf("fixture j%d tanpa baris", journalID)
+	}
+	return int(page.Rows[0].GarudaID), nil
+}
+
+// runView = Q4 E3: probe halaman /journal/view/N pada sampel campuran
+// (matched 6 + ambiguous 3 + not_found dgn garuda_url Tahap 1 5 + 4 URL dari
+// 2 kasus garuda_url beda) → fixture view-{id}.html utk pemetaan field
+// secara offline. Read-only terhadap db (mode=ro); resume bila file ada.
+func runView(dbPath, fixturesDir string, delayMin, delayMax time.Duration) error {
+	uri := "file:" + filepath.ToSlash(dbPath) + "?mode=ro"
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return fmt.Errorf("buka db: %w", err)
+	}
+	defer db.Close()
+
+	var daftar []viewKasus
+	queries := []struct{ label, q string }{
+		{"matched", `SELECT IFNULL(garuda_url,'') FROM journal_enrichment
+			WHERE match_status='matched' AND garuda_id IS NOT NULL AND COALESCE(garuda_url,'')<>''
+			ORDER BY journal_id LIMIT 6`},
+		{"notfound", `SELECT IFNULL(j.garuda_url,'') FROM journals j
+			JOIN journal_enrichment e ON e.journal_id=j.id
+			WHERE e.match_status='not_found' AND j.garuda_url LIKE '%/journal/view/%'
+			ORDER BY j.id LIMIT 5`},
+		{"beda-lama", `SELECT IFNULL(j.garuda_url,'') FROM journals j
+			JOIN journal_enrichment e ON e.journal_id=j.id
+			WHERE e.match_status='matched' AND TRIM(IFNULL(j.garuda_url,''))<>''
+			AND TRIM(IFNULL(j.garuda_url,''))<>TRIM(IFNULL(e.garuda_url,''))
+			ORDER BY j.id`},
+		{"beda-baru", `SELECT IFNULL(e.garuda_url,'') FROM journals j
+			JOIN journal_enrichment e ON e.journal_id=j.id
+			WHERE e.match_status='matched' AND TRIM(IFNULL(j.garuda_url,''))<>''
+			AND TRIM(IFNULL(j.garuda_url,''))<>TRIM(IFNULL(e.garuda_url,''))
+			ORDER BY e.journal_id`},
+	}
+	for _, qq := range queries {
+		if err := kumpulView(db, qq.q, qq.label, &daftar); err != nil {
+			return err
+		}
+	}
+
+	// ambiguous: garuda_id/garuda_url NULL di DB (jujur — tak milih salah satu),
+	// ambil kandidat pertama dari fixture search (offline, nol request).
+	ambRows, err := db.Query(`SELECT journal_id FROM journal_enrichment
+		WHERE match_status='ambiguous' ORDER BY journal_id LIMIT 3`)
+	if err != nil {
+		return fmt.Errorf("query ambiguous: %w", err)
+	}
+	for ambRows.Next() {
+		var jid int64
+		if err := ambRows.Scan(&jid); err != nil {
+			ambRows.Close()
+			return err
+		}
+		id, err := idDariFixtureSearch(fixturesDir, jid)
+		if err != nil {
+			fmt.Printf("ambiguous j%d dilewati: %v\n", jid, err)
+			continue
+		}
+		daftar = append(daftar, viewKasus{label: "ambiguous", url: garuda.ViewURL(id)})
+	}
+	if err := ambRows.Err(); err != nil {
+		ambRows.Close()
+		return err
+	}
+	ambRows.Close()
+
+	// dedup per garuda_id (label pertama menang)
+	unik := map[int]string{}
+	var urut []int
+	for _, k := range daftar {
+		id, err := idDariURL(k.url)
+		if err != nil {
+			fmt.Printf("lewati URL aneh (%s): %v\n", k.label, err)
+			continue
+		}
+		if _, ada := unik[id]; !ada {
+			unik[id] = k.label
+			urut = append(urut, id)
+		}
+	}
+	if len(urut) == 0 {
+		return fmt.Errorf("sampel kosong — cek db %s", dbPath)
+	}
+	if err := os.MkdirAll(fixturesDir, 0o755); err != nil {
+		return fmt.Errorf("buat dir fixture: %w", err)
+	}
+
+	fmt.Printf("== E3 probe view/N (sampel: %d URL unik, resume bila file ada) ==\n", len(urut))
+	c := garuda.NewClient("garuda-view", uaDefault, delayMin, delayMax)
+	var sukses, skip, gagal int
+	for i, id := range urut {
+		label := unik[id]
+		path := filepath.Join(fixturesDir, fmt.Sprintf("view-%d.html", id))
+		if _, err := os.Stat(path); err == nil {
+			skip++
+			fmt.Printf("[%d/%d] view-%d %-12s SKIP (sudah ada)\n", i+1, len(urut), id, label)
+			continue
+		}
+		t0 := time.Now()
+		body, status, err := c.Get(garuda.ViewURL(id), garuda.DefaultReferer)
+		ms := time.Since(t0).Milliseconds()
+		if err != nil || body == nil {
+			gagal++
+			fmt.Printf("[%d/%d] view-%d %-12s GAGAL http=%d %v\n", i+1, len(urut), id, label, status, err)
+			continue
+		}
+		if werr := os.WriteFile(path, body, 0o644); werr != nil {
+			return fmt.Errorf("tulis fixture view-%d: %w", id, werr)
+		}
+		sukses++
+		fmt.Printf("[%d/%d] view-%d %-12s http=%d %dB %dms\n", i+1, len(urut), id, label, status, len(body), ms)
+	}
+	fmt.Printf("E3 selesai: sukses=%d skip=%d gagal=%d → fixture di %s\n", sukses, skip, gagal, fixturesDir)
+	if sukses == 0 && skip == 0 {
+		return fmt.Errorf("tidak ada halaman view yang berhasil diunduh")
+	}
+	return nil
+}
+
+// runViewFill = E3 Opsi A (doc 31 §4, disetujui 4 Okt 2026): parse semua
+// fixture view-*.html → isi garuda_home_url & garuda_oai_url di
+// journal_enrichment. Resolve garuda_id → journal_id offline (nol request):
+// (1) garuda_url enrichment (matched — id Q3 utk kasus beda menang),
+// (2) garuda_url journals utk not_found, (3) kandidat pertama fixture search
+// utk ambiguous. Hanya 2 kolom view yang ditulis; id Record-Not-Found / tanpa
+// link dilewati tanpa tulis.
+func runViewFill(dbPath, fixturesDir string) error {
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	refs, err := store.ViewLinkRefs()
+	if err != nil {
+		return err
+	}
+	byID := map[int]int64{}
+	for _, r := range refs {
+		if _, ada := byID[r.GarudaID]; !ada {
+			byID[r.GarudaID] = r.JournalID
+		}
+	}
+	ambIDs, err := store.AmbiguousJournalIDs()
+	if err != nil {
+		return err
+	}
+	for _, jid := range ambIDs {
+		id, err := idDariFixtureSearch(fixturesDir, jid)
+		if err != nil {
+			fmt.Printf("ambiguous j%d dilewati: %v\n", jid, err)
+			continue
+		}
+		if _, ada := byID[id]; !ada {
+			byID[id] = jid
+		}
+	}
+
+	matches, err := filepath.Glob(filepath.Join(fixturesDir, "view-*.html"))
+	if err != nil {
+		return fmt.Errorf("glob fixture view: %w", err)
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("tidak ada fixture view-*.html di %s", fixturesDir)
+	}
+
+	fmt.Printf("== E3 view-fill: %d fixture, %d resolve id → journal ==\n", len(matches), len(byID))
+	var isi, tanpaResolve, tanpaLink, errCount int
+	for _, path := range matches {
+		m := reFixtureView.FindStringSubmatch(filepath.Base(path))
+		if m == nil {
+			continue
+		}
+		id, _ := strconv.Atoi(m[1])
+		jid, ada := byID[id]
+		if !ada {
+			tanpaResolve++
+			fmt.Printf("view-%d: TANPA RESOLVE (id lama ≠ pilihan Q3 — dilewati)\n", id)
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			errCount++
+			fmt.Printf("view-%d: baca GAGAL: %v\n", id, err)
+			continue
+		}
+		info, err := garuda.ParseViewPage(bytes.NewReader(b))
+		if err != nil {
+			errCount++
+			fmt.Printf("view-%d: parse GAGAL: %v\n", id, err)
+			continue
+		}
+		if info.NotFound || (info.HomeURL == "" && info.OAIURL == "") {
+			tanpaLink++
+			fmt.Printf("view-%d → j%d: TANPA LINK (record-not-found/placeholder) — dilewati\n", id, jid)
+			continue
+		}
+		if err := store.UpdateViewLinks(jid, info.HomeURL, info.OAIURL); err != nil {
+			errCount++
+			fmt.Printf("view-%d → j%d: tulis GAGAL: %v\n", id, jid, err)
+			continue
+		}
+		isi++
+		fmt.Printf("view-%d → j%d: home=%s oai=%s\n", id, jid, info.HomeURL, info.OAIURL)
+	}
+	fmt.Printf("view-fill selesai: isi=%d tanpa-resolve=%d tanpa-link=%d error=%d\n",
+		isi, tanpaResolve, tanpaLink, errCount)
+
+	// verifikasi akhir: jumlah baris terisi di db
+	terisi, err := store.CountViewLinks()
+	if err != nil {
+		return fmt.Errorf("verifikasi: %w", err)
+	}
+	fmt.Printf("verifikasi: baris dgn link terisi = %d\n", terisi)
+	if isi == 0 {
+		return fmt.Errorf("tidak ada baris yang terisi — cek resolve/fixture")
+	}
 	return nil
 }
 
