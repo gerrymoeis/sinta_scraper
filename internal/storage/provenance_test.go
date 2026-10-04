@@ -179,8 +179,9 @@ func TestProvenanceTidakSentuhJournals(t *testing.T) {
 
 // TestMigrasiDBSumberStage2 = verifikasi Q1 Langkah 5 (doc 30 §11.2):
 // jalankan Open() terhadap duplikat DB sumber Tahap 2 → 4 tabel muncul,
-// journals tetap 261 (IMMUTABLE), provenance semua '{}'. Idempoten;
-// di-skip bila file tidak ada (mis. sebelum rapikan folder).
+// journals tetap 261 (db sumber = baca, isinya tak berubah), provenance
+// semua '{}'. Idempoten; di-skip bila file tidak ada (mis. sebelum
+// rapikan folder).
 func TestMigrasiDBSumberStage2(t *testing.T) {
 	path := filepath.Join("..", "..", "data", "stage2", "sinta-r1-source.db")
 	if _, err := os.Stat(path); err != nil {
@@ -203,7 +204,7 @@ func TestMigrasiDBSumberStage2(t *testing.T) {
 		t.Fatalf("hitung journals: %v", err)
 	}
 	if n != 261 {
-		t.Errorf("journals = %d, HARUS 261 (immutable terlanggar!)", n)
+		t.Errorf("journals = %d, HARUS 261 (db sumber berubah — bukan karena test ini boleh menulisnya!)", n)
 	}
 	var provKosong int
 	if err := st.db.QueryRow(
