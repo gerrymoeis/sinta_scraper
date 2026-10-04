@@ -7,11 +7,14 @@
 //	-subjects : harvest subject 261 → build subject_map + harmonisasi (Q3 langkah 4–5).
 //	-view : probe halaman view/N campuran (Q4 E3) — fixture view-{id}.html, read-only.
 //	-view-fill : isi garuda_home_url/garuda_oai_url dari fixture view (E3 Opsi A).
+//	-hitrate : E4a — hit-rate & ladder MATCH dari fixture (nol request), read-only.
+//	-e4b : E4b — year-range check duplikat + search alt + view resolve + TULIS (approve 4 Okt).
 package main
 
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -36,6 +39,8 @@ func main() {
 	subjects := flag.Bool("subjects", false, "harvest subject + build subject_map + harmonisasi")
 	view := flag.Bool("view", false, "probe halaman view/N campuran (E3) — simpan fixture, read-only")
 	viewFill := flag.Bool("view-fill", false, "isi garuda_home_url/garuda_oai_url dari fixture view (E3 Opsi A) — tulis 2 kolom saja")
+	hitrate := flag.Bool("hitrate", false, "E4a: hit-rate & ladder Match dari fixture (nol request) — read-only, laporan + JSON")
+	e4b := flag.Bool("e4b", false, "E4b: year-range check duplikat + search alt + view resolve + tulis (pagu 90 GET, approve 4 Okt)")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -65,6 +70,20 @@ func main() {
 	if *viewFill {
 		if err := runViewFill(*dbPath, *fixtures); err != nil {
 			fmt.Fprintf(os.Stderr, "view-fill GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *hitrate {
+		if err := runHitrate(*dbPath, *fixtures); err != nil {
+			fmt.Fprintf(os.Stderr, "hitrate GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e4b {
+		if err := runE4b(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e4b GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
@@ -413,6 +432,202 @@ func runViewFill(dbPath, fixturesDir string) error {
 	if isi == 0 {
 		return fmt.Errorf("tidak ada baris yang terisi — cek resolve/fixture")
 	}
+	return nil
+}
+
+// hitrateBaris = satu baris laporan E4a (utk JSON detail).
+type hitrateBaris struct {
+	JournalID int64   `json:"journal_id"`
+	Nama      string  `json:"nama"`
+	Baseline  string  `json:"baseline"` // match_status db (Q3)
+	NKandidat int     `json:"kandidat"` // baris fixture utk jurnal ini
+	Status    string  `json:"status"`   // hasil Match (re-ladder)
+	By        string  `json:"by,omitempty"`
+	Conf      float64 `json:"confidence,omitempty"`
+	Auto      bool    `json:"auto_accept,omitempty"`
+	Notes     string  `json:"notes,omitempty"`
+}
+
+// hitrateJSON = laporan E4a utuh (data/stage2/hitrate-e4a.json).
+type hitrateJSON struct {
+	Dibuat       string         `json:"dibuat"`
+	Total        int            `json:"total"`
+	Baseline     map[string]int `json:"baseline"`      // match_status db
+	MatchedByDB  map[string]int `json:"matched_by_db"` // tier baseline (Q3)
+	Reladder     map[string]int `json:"reladder_status"`
+	ReladderBy   map[string]int `json:"reladder_matched_by"`
+	Confidence   map[string]int `json:"reladder_confidence"` // skor diskrit 100/85/60
+	AutoAccept   int            `json:"reladder_auto_accept"`
+	DeltaNaik    int            `json:"delta_naik"`  // miss -> matched
+	DeltaTurun   int            `json:"delta_turun"` // baseline matched -> bukan matched
+	TetapMatched int            `json:"tetap_matched"`
+	TetapMiss    int            `json:"tetap_miss"`
+	Miss52       []hitrateBaris `json:"miss_52_detail"`
+	Turun        []hitrateBaris `json:"baseline_turun_detail"`
+	ButuhLive    []int64        `json:"butuh_live"` // kandidat 0 (found=0)
+}
+
+// runHitrate = E4a (doc 30 §14.3 langkah 1): ladder Match (Q2) atas 261
+// jurnal memakai fixture search Q3 — READ-ONLY (db mode=ro), NOL request,
+// TANPA tulis hasil (tulis = E4b setelah approve K6). Output: laporan
+// ringkas + JSON detail utk kalibrasi ambang §5.2.
+func runHitrate(dbPath, fixturesDir string) error {
+	uri := "file:" + filepath.ToSlash(dbPath) + "?mode=ro"
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return fmt.Errorf("buka db: %w", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`
+		SELECT j.id, j.name, COALESCE(j.print_issn,''), COALESCE(j.electronic_issn,''),
+		       COALESCE(j.affiliation_name,''),
+		       e.match_status, COALESCE(e.matched_by,''), COALESCE(e.match_confidence,0)
+		FROM journals j JOIN journal_enrichment e ON e.journal_id = j.id
+		ORDER BY j.id`)
+	if err != nil {
+		return fmt.Errorf("query jurnal: %w", err)
+	}
+
+	rep := hitrateJSON{
+		Dibuat:      time.Now().UTC().Format(time.RFC3339),
+		Baseline:    map[string]int{},
+		MatchedByDB: map[string]int{},
+		Reladder:    map[string]int{},
+		ReladderBy:  map[string]int{},
+		Confidence:  map[string]int{},
+	}
+
+	for rows.Next() {
+		var id int64
+		var name, pissn, eissn, pub, status, byDB string
+		var confDB float64
+		if err := rows.Scan(&id, &name, &pissn, &eissn, &pub, &status, &byDB, &confDB); err != nil {
+			rows.Close()
+			return err
+		}
+		rep.Total++
+		rep.Baseline[status]++
+		if status == "matched" {
+			rep.MatchedByDB[byDB]++
+		}
+
+		cands, nRows, err := garuda.KandidatDariFixture(fixturesDir, id)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("kandidat j%d: %w", id, err)
+		}
+		res := garuda.Match(garuda.Input{Name: name, PISSN: pissn, EISSN: eissn, Publisher: pub}, cands)
+		rep.Reladder[string(res.Status)]++
+		if res.Status == garuda.StatusMatched {
+			rep.ReladderBy[res.MatchedBy]++
+			rep.Confidence[strconv.FormatFloat(res.Confidence, 'f', -1, 64)]++
+			if res.AutoAccept {
+				rep.AutoAccept++
+			}
+		}
+
+		b := hitrateBaris{
+			JournalID: id, Nama: name, Baseline: status, NKandidat: nRows,
+			Status: string(res.Status), By: res.MatchedBy, Conf: res.Confidence,
+			Auto: res.AutoAccept, Notes: res.Notes,
+		}
+		// klasifikasi delta baseline vs re-ladder
+		baseMatched := status == "matched"
+		resMatched := res.Status == garuda.StatusMatched
+		switch {
+		case !baseMatched && resMatched:
+			rep.DeltaNaik++
+		case baseMatched && !resMatched:
+			rep.DeltaTurun++
+			rep.Turun = append(rep.Turun, b)
+		case baseMatched:
+			rep.TetapMatched++
+		default:
+			rep.TetapMiss++
+		}
+		// fokus E4: 52 miss (not_found + ambiguous) di-detailkan
+		if !baseMatched {
+			rep.Miss52 = append(rep.Miss52, b)
+		}
+		// ladder mustahil tanpa kandidat → daftar live (hanya utk miss)
+		if !baseMatched && nRows == 0 {
+			rep.ButuhLive = append(rep.ButuhLive, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	// ---- laporan ringkas ----
+	fmt.Println("== E4a hit-rate & ladder Match (READ-ONLY — nol request, tanpa tulis) ==")
+	fmt.Printf("total=%d · baseline: matched=%d not_found=%d ambiguous=%d\n",
+		rep.Total, rep.Baseline["matched"], rep.Baseline["not_found"], rep.Baseline["ambiguous"])
+	fmt.Print("A. baseline matched_by: ")
+	for k, v := range rep.MatchedByDB {
+		fmt.Printf("%s=%d ", k, v)
+	}
+	fmt.Println()
+
+	fmt.Printf("B. re-ladder 261 (informatif): matched=%d not_found=%d ambiguous=%d\n",
+		rep.Reladder["matched"], rep.Reladder["not_found"], rep.Reladder["ambiguous"])
+	fmt.Print("   tier: ")
+	for _, k := range []string{"eissn", "pissn", "title+publisher", "title"} {
+		fmt.Printf("%s=%d ", k, rep.ReladderBy[k])
+	}
+	fmt.Printf("| confidence: 100=%d 85=%d 60=%d | auto-accept(>=85)=%d\n",
+		rep.Confidence["100"], rep.Confidence["85"], rep.Confidence["60"], rep.AutoAccept)
+	fmt.Printf("   delta vs baseline: naik=%d turun=%d tetap-matched=%d tetap-miss=%d\n",
+		rep.DeltaNaik, rep.DeltaTurun, rep.TetapMatched, rep.TetapMiss)
+	if len(rep.Turun) > 0 {
+		fmt.Println("   PERHATIAN — baseline matched yg TURUN saat re-ladder (cross-check/selisih):")
+		for _, b := range rep.Turun {
+			fmt.Printf("     j%-4d %-45.45s %s\n", b.JournalID, b.Nama, b.Notes)
+		}
+	}
+
+	// ---- 52 miss ----
+	var mMatch, mAmb, mNF int
+	ambCross, ambSelisih := 0, 0
+	tier := map[string]int{}
+	for _, b := range rep.Miss52 {
+		switch b.Status {
+		case "matched":
+			mMatch++
+			tier[b.By]++
+		case "ambiguous":
+			mAmb++
+			if strings.Contains(b.Notes, "kemiripan title") {
+				ambCross++
+			} else if strings.Contains(b.Notes, "selisih") {
+				ambSelisih++
+			}
+		default:
+			mNF++
+		}
+	}
+	fmt.Printf("C. ladder 52 miss (fokus E4): matched=%d ambiguous=%d not_found=%d\n", mMatch, mAmb, mNF)
+	fmt.Print("   naik via tier: ")
+	for _, k := range []string{"pissn", "title+publisher", "title"} {
+		fmt.Printf("%s=%d ", k, tier[k])
+	}
+	fmt.Printf("| ambiguous: cross-check=%d selisih-top2=%d\n", ambCross, ambSelisih)
+
+	fmt.Printf("D. butuh live (kandidat 0/found=0): %d jurnal → ", len(rep.ButuhLive))
+	fmt.Println(rep.ButuhLive)
+
+	// ---- JSON detail utk kalibrasi ----
+	out, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal json: %w", err)
+	}
+	jsonPath := filepath.Join(filepath.Dir(fixturesDir), "hitrate-e4a.json")
+	if err := os.WriteFile(jsonPath, out, 0o644); err != nil {
+		return fmt.Errorf("tulis json: %w", err)
+	}
+	fmt.Printf("JSON detail → %s\n", jsonPath)
 	return nil
 }
 

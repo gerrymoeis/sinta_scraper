@@ -173,6 +173,30 @@ func (s *Store) UpsertGarudaMatch(m GarudaMatch) error {
 	return nil
 }
 
+// AmbigousMatchedIDs = baris matched yang masih membawa flag AMBIGUOUS lama
+// (inkonsistensi flags vs match_status — mis. E4b me-resolve ambiguous jadi
+// matched tanpa merapikan flag). Dipakai utk cleanup konsistensi.
+func (s *Store) AmbigousMatchedIDs() ([]int64, error) {
+	rows, err := s.db.Query(`
+		SELECT e.journal_id FROM journal_enrichment e
+		JOIN phase2_progress p ON p.journal_id = e.journal_id
+		WHERE e.match_status = 'matched' AND p.flags LIKE '%AMBIGUOUS%'
+		ORDER BY e.journal_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // SubjectMapRow = baris input rebuild subject_map (padanan storage dari
 // garuda.MapRow — tanpa impor silang utk hindari cycle).
 type SubjectMapRow struct {

@@ -11,7 +11,7 @@ import (
 const snippetView = `<!DOCTYPE html><html><body>
 <div class="j-meta-title">JURNAL CONTOH ILMU</div>
 <div class="j-meta-pub">Published by
-  <a href="https://garuda.kemdikbud.go.id/publisher/1">Penerbit Contoh</a><br>
+  <a href="https://garuda.kemdiktisaintek.go.id/publisher/1">Penerbit Contoh</a><br>
   ISSN : <a href="#">2442-1101</a> ;
   EISSN : <a href="#">2580-9912</a> ;
   DOI : <a href="#">10.1234/contoh</a>
@@ -55,6 +55,62 @@ func TestParseViewPage(t *testing.T) {
 	}
 	if len(v.Areas) != 1 || v.Areas[0] != "Social Sciences" {
 		t.Errorf("Areas = %v (duplikat harusnya terbuang)", v.Areas)
+	}
+}
+
+// snippetFilterTahun = potongan HTML ASLI yang dikirim user (halaman view
+// AGRARIS 35522 — 4 Okt 2026): blok "Filter by Year" embed di HTML response
+// (tanpa XHR), tahun 2015–2026 → penentu entri duplikat aktif (doc 32 §4).
+const snippetFilterTahun = `<div class="ui segment padded">
+            <a class="ui top attached label">Filter by Year</a>
+            <p>
+                2015                <span style="float: right"> 2026</span>
+            </p> 
+            <div id="slider-range" class="ui-slider ui-corner-all ui-slider-horizontal ui-widget ui-widget-content"><div class="ui-slider-range ui-corner-all ui-widget-header" style="left: 0%; width: 100%;"></div><span tabindex="0" class="ui-slider-handle ui-corner-all ui-state-default" style="left: 0%;"></span><span tabindex="0" class="ui-slider-handle ui-corner-all ui-state-default" style="left: 100%;"></span></div>
+            <br>
+
+            <form id="filter_year" class="ui mini form" action="" method="get">
+                                <div class="equal width fields">
+                    <div class="field">
+                        <label>From</label>
+                        <input type="text" id="from" name="from">
+                    </div>
+                    <div class="field">
+                        <label>To</label>
+                        <input type="text" id="to" name="to">
+                    </div>
+                </div>
+                <div class="equal width fields">
+                    <div class="field">
+                        <button class="ui mini fluid button" type="submit">Filter</button>
+                    </div>
+                    <div class="field">
+                        <a class="ui mini fluid button basic red" href="/journal/view/35522">Reset</a>
+                    </div>
+                </div>
+                
+            </form>
+        </div>`
+
+func TestParseViewPageFilterTahun(t *testing.T) {
+	v, err := ParseViewPage(strings.NewReader(snippetFilterTahun))
+	if err != nil {
+		t.Fatalf("ParseViewPage: %v", err)
+	}
+	if v.YearFrom != 2015 || v.YearTo != 2026 {
+		t.Errorf("tahun = %d–%d (diharapkan 2015–2026)", v.YearFrom, v.YearTo)
+	}
+}
+
+func TestParseViewPageTanpaFilterTahun(t *testing.T) {
+	// halaman tanpa blok tahun (Record Not Found / jurnal tanpa artikel)
+	// → 0,0 agar penelusur bisa membedakan "tak ada" vs "tanpa konten".
+	v, err := ParseViewPage(strings.NewReader(`<div class="j-meta-title">X</div>Record Not Found`))
+	if err != nil {
+		t.Fatalf("ParseViewPage: %v", err)
+	}
+	if v.YearFrom != 0 || v.YearTo != 0 {
+		t.Errorf("tahun = %d–%d (diharapkan 0–0)", v.YearFrom, v.YearTo)
 	}
 }
 

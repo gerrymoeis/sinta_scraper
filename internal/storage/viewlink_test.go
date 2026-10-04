@@ -80,7 +80,7 @@ func TestUpdateViewLinks(t *testing.T) {
 	}
 	if err := st.UpsertGarudaMatch(GarudaMatch{
 		JournalID: 501, Status: "matched", GarudaID: 7211,
-		GarudaURL: "https://garuda.kemdikbud.go.id/journal/view/7211",
+		GarudaURL: "https://garuda.kemdiktisaintek.go.id/journal/view/7211",
 	}); err != nil {
 		t.Fatalf("UpsertGarudaMatch: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestUpdateViewLinks(t *testing.T) {
 	// tak menyentuh garuda_home_url/garuda_oai_url)
 	if err := st.UpsertGarudaMatch(GarudaMatch{
 		JournalID: 501, Status: "matched", GarudaID: 7211,
-		GarudaURL: "https://garuda.kemdikbud.go.id/journal/view/7211",
+		GarudaURL: "https://garuda.kemdiktisaintek.go.id/journal/view/7211",
 	}); err != nil {
 		t.Fatalf("UpsertGarudaMatch ulang: %v", err)
 	}

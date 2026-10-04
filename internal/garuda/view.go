@@ -5,6 +5,7 @@ import (
 	"html"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,12 @@ type ViewInfo struct {
 	HomeURL   string   // link "Home Page" = URL OJS resmi (16/18 halaman)
 	OAIURL    string   // link "OAI Link" = URL OAI jurnal (16/18)
 	Areas     []string // label <a href="/area/index/N"> (cross-check subject)
+	// Blok sidebar "Filter by Year" (embed di HTML, doc 32 §4): tahun awal
+	// & akhir artikel terindeks di halaman ini — penentu entri duplikat
+	// yang masih AKTIF. 0 = blok tak ada (jurnal tanpa artikel / halaman
+	// rusak).
+	YearFrom int
+	YearTo   int
 }
 
 var (
@@ -32,6 +39,11 @@ var (
 	viewDOIRe    = regexp.MustCompile(`(?is)DOI\s*:\s*<a[^>]*>(.*?)</a>`)
 	viewAreaRe   = regexp.MustCompile(`(?is)<a[^>]*href="/area/index/\d+"[^>]*>(.*?)</a>`)
 	viewNotFound = regexp.MustCompile(`(?is)Record Not Found`)
+	// Blok "Filter by Year" (lihat user 4 Okt 2026 — doc 31 §2):
+	//   <a class="ui top attached label">Filter by Year</a>
+	//   <p> 2015 <span style="float: right"> 2026</span></p>
+	// group 1 = tahun awal, group 2 = tahun akhir.
+	viewYearRe = regexp.MustCompile(`(?is)Filter by Year</a>\s*<p>\s*(\d{4})\s*<span[^>]*>\s*(\d{4})`)
 )
 
 // linkView mengambil href dari <a> yang teksnya persis label ("Home Page" /
@@ -88,6 +100,10 @@ func ParseViewPage(r io.Reader) (*ViewInfo, error) {
 	}
 	v.HomeURL = linkView(doc, "Home Page")
 	v.OAIURL = linkView(doc, "OAI Link")
+	if m := viewYearRe.FindStringSubmatch(doc); m != nil {
+		v.YearFrom, _ = strconv.Atoi(m[1])
+		v.YearTo, _ = strconv.Atoi(m[2])
+	}
 	seen := map[string]bool{}
 	for _, m := range viewAreaRe.FindAllStringSubmatch(doc, -1) {
 		lbl := bersihView(m[1])
