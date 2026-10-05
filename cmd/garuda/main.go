@@ -9,6 +9,8 @@
 //	-view-fill : isi garuda_home_url/garuda_oai_url dari fixture view (E3 Opsi A).
 //	-hitrate : E4a — hit-rate & ladder MATCH dari fixture (nol request), read-only.
 //	-e4b : E4b — year-range check duplikat + search alt + view resolve + TULIS (approve 4 Okt).
+//	-e5 : E5 — probe OAI Identify + platform home 20 jurnal external (pagu 40 GET),
+//	      tanpa tulis db → e5-results.json (approve 4 Okt).
 package main
 
 import (
@@ -41,6 +43,7 @@ func main() {
 	viewFill := flag.Bool("view-fill", false, "isi garuda_home_url/garuda_oai_url dari fixture view (E3 Opsi A) — tulis 2 kolom saja")
 	hitrate := flag.Bool("hitrate", false, "E4a: hit-rate & ladder Match dari fixture (nol request) — read-only, laporan + JSON")
 	e4b := flag.Bool("e4b", false, "E4b: year-range check duplikat + search alt + view resolve + tulis (pagu 90 GET, approve 4 Okt)")
+	e5 := flag.Bool("e5", false, "E5: probe OAI Identify + platform home 20 jurnal external (pagu 40 GET) — tanpa tulis db")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -84,6 +87,13 @@ func main() {
 	if *e4b {
 		if err := runE4b(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
 			fmt.Fprintf(os.Stderr, "e4b GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e5 {
+		if err := runE5(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e5 GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
