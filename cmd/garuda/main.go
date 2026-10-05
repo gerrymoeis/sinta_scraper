@@ -11,6 +11,9 @@
 //	-e4b : E4b — year-range check duplikat + search alt + view resolve + TULIS (approve 4 Okt).
 //	-e5 : E5 — probe OAI Identify + platform home 20 jurnal external (pagu 40 GET),
 //	      tanpa tulis db → e5-results.json (approve 4 Okt).
+//	-wafsmoke : validasi integrasi hybrid (doc 35) — 1 GET penuh via Client.Get.
+//	-otismoke : probe A solver murni-Go (approve 4 Okt) — solve challenge via
+//	      browser bawaan-OS (chromedp) + 1 GET konfirmasi tls-client.
 package main
 
 import (
@@ -44,6 +47,8 @@ func main() {
 	hitrate := flag.Bool("hitrate", false, "E4a: hit-rate & ladder Match dari fixture (nol request) — read-only, laporan + JSON")
 	e4b := flag.Bool("e4b", false, "E4b: year-range check duplikat + search alt + view resolve + tulis (pagu 90 GET, approve 4 Okt)")
 	e5 := flag.Bool("e5", false, "E5: probe OAI Identify + platform home 20 jurnal external (pagu 40 GET) — tanpa tulis db")
+	wafsmoke := flag.String("wafsmoke", "", "validasi integrasi hybrid (doc 35): GET 1 URL penuh lewat Client.Get — jalur std + fallback 403")
+	otismoke := flag.String("otismoke", "", "probe A solver murni-Go: solve challenge via browser bawaan-OS + 1 GET konfirmasi tls-client")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -98,7 +103,66 @@ func main() {
 		}
 		return
 	}
+	if *wafsmoke != "" {
+		if err := runWAFSmoke(*wafsmoke, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "wafsmoke GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *otismoke != "" {
+		if err := runOTISMoke(*otismoke); err != nil {
+			fmt.Fprintf(os.Stderr, "otismoke GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	flag.Usage()
+}
+
+// runWAFSmoke = validasi integrasi hybrid (doc 35): satu GET penuh lewat
+// Client.Get — jalur std (UA riset); bila 403 → fallback tls-client/solver
+// otomatis. End-to-end tanpa menyentuh db.
+func runWAFSmoke(rawURL string, delayMin, delayMax time.Duration) error {
+	c := garuda.NewClient("wafsmoke", uaDefault, delayMin, delayMax)
+	start := time.Now()
+	body, status, err := c.Get(rawURL, garuda.DefaultReferer)
+	elapsed := time.Since(start).Milliseconds()
+	if err != nil {
+		return fmt.Errorf("GET %s: status=%d err=%w", rawURL, status, err)
+	}
+	fmt.Printf("wafsmoke OK | %s | http=%d | %d B | %d ms | solves=%d\n",
+		rawURL, status, len(body), elapsed, c.Solves())
+	return nil
+}
+
+// runOTISMoke = probe A (approve 4 Okt 2026): BrowserSolve (chromedp + browser
+// bawaan-OS, flag mirror nodriver) → bila solve OK, 1 GET konfirmasi
+// tls-client dgn cookie+UA (bukti == doc 34 §6b baris 8/9). GET dipakai:
+// 1 navigasi (reload pasca-solve ikut) + 1 konfirmasi = ≤3.
+func runOTISMoke(rawURL string) error {
+	exe, err := garuda.FindBrowser()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("otismoke browser | %s\n", exe)
+	t0 := time.Now()
+	cookie, ua, err := garuda.BrowserSolve(rawURL)
+	solveMS := time.Since(t0).Milliseconds()
+	if err != nil {
+		return fmt.Errorf("solve: %w", err)
+	}
+	fmt.Printf("otismoke solve OK | %d ms | cookie=%d B | ua=%.90s\n", solveMS, len(cookie), ua)
+	t1 := time.Now()
+	status, body, err := garuda.WAFConfirm(rawURL, cookie, ua)
+	if err != nil {
+		return fmt.Errorf("konfirmasi: %w", err)
+	}
+	fmt.Printf("otismoke confirm | http=%d | %d B | %d ms\n", status, len(body), time.Since(t1).Milliseconds())
+	if status != 200 {
+		return fmt.Errorf("konfirmasi http=%d (bukan 200)", status)
+	}
+	return nil
 }
 
 // runSubjects = Q3 langkah 4–5: harvest 261 → build subject_map → harmonisasi.
