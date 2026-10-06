@@ -15,6 +15,9 @@
 //	      pagu 50 GET, tanpa tulis db → e6-results.json (opsi A approve 4 Okt).
 //	-e7a : E7a — dry-run aturan merge 4 lapis 10 jurnal (doc 30 §14.6),
 //	      read-only (nol GET, nol tulis db) → e7a-dryrun.json utk review aturan.
+//	-e7b : E7b — sinkronisasi journals: fill subject_area dari canonical +
+//	      overwrite garuda_url (backup .preE7 + provenance + verifikasi K1)
+//	      → e7b-results.json (approve 6 Okt).
 //	-wafsmoke : validasi integrasi hybrid (doc 35) — 1 GET penuh via Client.Get.
 //	-otismoke : probe A solver murni-Go (approve 4 Okt) — solve challenge via
 //	      browser bawaan-OS (chromedp) + 1 GET konfirmasi tls-client.
@@ -56,6 +59,7 @@ func main() {
 	wafsmoke := flag.String("wafsmoke", "", "validasi integrasi hybrid (doc 35): GET 1 URL penuh lewat Client.Get — jalur std + fallback 403")
 	otismoke := flag.String("otismoke", "", "probe A solver murni-Go: solve challenge via browser bawaan-OS + 1 GET konfirmasi tls-client")
 	e7a := flag.Bool("e7a", false, "E7a: dry-run aturan merge 4 lapis 10 jurnal (doc 30 §14.6) - read-only, nol GET, nol tulis db")
+	e7b := flag.Bool("e7b", false, "E7b: sinkronisasi journals (fill subject 129 + overwrite garuda_url 9, backup+provenance+verifikasi) - TULIS, nol GET")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -120,6 +124,13 @@ func main() {
 	if *e7a {
 		if err := runE7A(*dbPath, "data/stage2/e6-results.json", "data/stage2/e7a-dryrun.json"); err != nil {
 			fmt.Fprintf(os.Stderr, "e7a GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7b {
+		if err := runE7B(*dbPath, "data/stage2/e7b-results.json"); err != nil {
+			fmt.Fprintf(os.Stderr, "e7b GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
