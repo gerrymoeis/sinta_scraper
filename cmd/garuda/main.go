@@ -11,6 +11,8 @@
 //	-e4b : E4b — year-range check duplikat + search alt + view resolve + TULIS (approve 4 Okt).
 //	-e5 : E5 — probe OAI Identify + platform home 20 jurnal external (pagu 40 GET),
 //	      tanpa tulis db → e5-results.json (approve 4 Okt).
+//	-e6 : E6 — coverage Crossref & DOAJ 24 ISSN stratified (18 S1 + 3 S2 + 3 S3),
+//	      pagu 50 GET, tanpa tulis db → e6-results.json (opsi A approve 4 Okt).
 //	-wafsmoke : validasi integrasi hybrid (doc 35) — 1 GET penuh via Client.Get.
 //	-otismoke : probe A solver murni-Go (approve 4 Okt) — solve challenge via
 //	      browser bawaan-OS (chromedp) + 1 GET konfirmasi tls-client.
@@ -47,6 +49,8 @@ func main() {
 	hitrate := flag.Bool("hitrate", false, "E4a: hit-rate & ladder Match dari fixture (nol request) — read-only, laporan + JSON")
 	e4b := flag.Bool("e4b", false, "E4b: year-range check duplikat + search alt + view resolve + tulis (pagu 90 GET, approve 4 Okt)")
 	e5 := flag.Bool("e5", false, "E5: probe OAI Identify + platform home 20 jurnal external (pagu 40 GET) — tanpa tulis db")
+	e6 := flag.Bool("e6", false, "E6: coverage Crossref & DOAJ 24 ISSN (18 S1 + 3 S2 + 3 S3, opsi A) — pagu 50 GET, tanpa tulis db (approve 4 Okt)")
+	e6DB2 := flag.String("e6-db2", "data/stage1/vdac-l1-r23-kumulatif.db", "db sumber sampel silang-rank S2/S3 utk E6 (read-only)")
 	wafsmoke := flag.String("wafsmoke", "", "validasi integrasi hybrid (doc 35): GET 1 URL penuh lewat Client.Get — jalur std + fallback 403")
 	otismoke := flag.String("otismoke", "", "probe A solver murni-Go: solve challenge via browser bawaan-OS + 1 GET konfirmasi tls-client")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
@@ -99,6 +103,13 @@ func main() {
 	if *e5 {
 		if err := runE5(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
 			fmt.Fprintf(os.Stderr, "e5 GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e6 {
+		if err := runE6(*dbPath, *e6DB2, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e6 GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
