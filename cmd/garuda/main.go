@@ -18,6 +18,10 @@
 //	-e7b : E7b — sinkronisasi journals: fill subject_area dari canonical +
 //	      overwrite garuda_url (backup .preE7 + provenance + verifikasi K1)
 //	      → e7b-results.json (approve 6 Okt).
+//	-e7c : E7c — miss-8 multi-sumber LIVE (Crossref by-ISSN + OAI j673/j689 +
+//	      search+view j60 + Q3 DOAJ), Opsi A: status not_found utuh + field
+//	      alt_* dgn provenance — pagu 18 GET, backup .preE7c + verifikasi K1
+//	      → e7c-results.json (mulai approve 6 Okt).
 //	-wafsmoke : validasi integrasi hybrid (doc 35) — 1 GET penuh via Client.Get.
 //	-otismoke : probe A solver murni-Go (approve 4 Okt) — solve challenge via
 //	      browser bawaan-OS (chromedp) + 1 GET konfirmasi tls-client.
@@ -60,6 +64,7 @@ func main() {
 	otismoke := flag.String("otismoke", "", "probe A solver murni-Go: solve challenge via browser bawaan-OS + 1 GET konfirmasi tls-client")
 	e7a := flag.Bool("e7a", false, "E7a: dry-run aturan merge 4 lapis 10 jurnal (doc 30 §14.6) - read-only, nol GET, nol tulis db")
 	e7b := flag.Bool("e7b", false, "E7b: sinkronisasi journals (fill subject 129 + overwrite garuda_url 9, backup+provenance+verifikasi) - TULIS, nol GET")
+	e7c := flag.Bool("e7c", false, "E7c: miss-8 multi-sumber LIVE (Crossref+OAI+view+Q3 DOAJ, Opsi A prov alt_*) - pagu 18 GET, TULIS prov")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -131,6 +136,13 @@ func main() {
 	if *e7b {
 		if err := runE7B(*dbPath, "data/stage2/e7b-results.json"); err != nil {
 			fmt.Fprintf(os.Stderr, "e7b GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7c {
+		if err := runE7C(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e7c GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
