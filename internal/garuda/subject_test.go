@@ -355,3 +355,45 @@ func TestSplitSubjectRoundTrip(t *testing.T) {
 		t.Errorf("split sinta = %q", got)
 	}
 }
+
+// ---------- MergeSubjectArea (E7f Opsi A — doc 38 §13 butir 4) ----------
+
+func TestMergeSubjectArea(t *testing.T) {
+	kasus := []struct {
+		existing string
+		incoming []string
+		want     string
+	}{
+		// fill (existing kosong) → istilah baru terurut ASC.
+		{"", []string{"Language and Literature", "Philology. Linguistics"},
+			"Language and Literature, Philology. Linguistics"},
+		// append → existing K1 dipertahankan apa adanya (tak diurutkan ulang).
+		{"Social, Economic", []string{"Society"}, "Social, Economic, Society"},
+		// dedup per FoldSubject: case + singular-fold.
+		{"Education", []string{"education", "Arts"}, "Education, Arts"},
+		{"Art", []string{"Arts"}, "Art"},
+		// suffix-s: politics≡politic (opsi B/C ditolak — fold saja, tanpa fuzzy).
+		{"Politics", []string{"Politic"}, "Politics"},
+		// duplikat dlm incoming sendiri juga didedup.
+		{"", []string{"Politics", "Politic"}, "Politics"},
+		// term kosong / fold kosong dilewati.
+		{"Education", []string{"", "  "}, "Education"},
+	}
+	for _, k := range kasus {
+		if got := MergeSubjectArea(k.existing, k.incoming); got != k.want {
+			t.Errorf("MergeSubjectArea(%q, %q) = %q, want %q",
+				k.existing, k.incoming, got, k.want)
+		}
+	}
+}
+
+func TestMergeSubjectAreaIdempoten(t *testing.T) {
+	sekali := MergeSubjectArea("Education", []string{"Society", "arts"})
+	kali2 := MergeSubjectArea(sekali, []string{"Society", "arts"})
+	if kali2 != sekali {
+		t.Errorf("ulang = %q, want byte identik %q", kali2, sekali)
+	}
+	if got := MergeSubjectArea("", nil); got != "" {
+		t.Errorf("kosong = %q, want \"\"", got)
+	}
+}

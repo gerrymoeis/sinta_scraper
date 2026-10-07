@@ -15,6 +15,8 @@ func TestNormISSN(t *testing.T) {
 		"":           "",
 		"12345":      "",
 		"abc def!":   "",
+		"-":          "", // placeholder garuda_pissn — dilarang masuk kolom (doc30 §6.2)
+		"0":          "", // placeholder kolom lama
 	}
 	for in, want := range cases {
 		if got := NormISSN(in); got != want {

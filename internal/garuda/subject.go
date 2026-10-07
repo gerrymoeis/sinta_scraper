@@ -385,3 +385,40 @@ func splitSubject(system, raw string) []string {
 // aturan HarmonizeSubject.
 func SplitSintaSubject(raw string) []string  { return splitSubject(SystemSinta, raw) }
 func SplitGarudaSubject(raw string) []string { return splitSubject(SystemGaruda, raw) }
+
+// MergeSubjectArea = fill/append subject_area E7f (Opsi A — doc 38 §13 butir 4,
+// approve user 6 Okt 2026): gabung istilah baru dgn nilai existing DEDUP per
+// FoldSubject ("politics"≡"politic" lewat suffix-s, "Arts"≡"Art" lewat
+// singular-fold → tak diduplikat; beda konsep tetap tampil dua — TANPA
+// contain/fuzzy yg ambigu, doc 38 §13 butir 4 opsi B/C ditolak).
+//
+// Invariant:
+//   - K1: istilah existing dipertahankan APA ADANYA (tidak disaring/diurutkan
+//     ulang — nilai lama tak pernah berubah bentuk);
+//   - istilah baru diurutkan ASC lalu di-append (deterministik);
+//   - idempoten: MergeSubjectArea(x, MergeSubjectArea-y-ish) — panggilan ke-2
+//     dgn istilah sama = byte identik (semua sudah di seen);
+//   - existing kosong → hasil = istilah baru terurut dedup.
+func MergeSubjectArea(existing string, incoming []string) string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(SplitSintaSubject(existing))+len(incoming))
+	for _, t := range SplitSintaSubject(existing) {
+		out = append(out, t)
+		if k := FoldSubject(t); k != "" {
+			seen[k] = true
+		}
+	}
+	var baru []string
+	for _, t := range incoming {
+		t = strings.TrimSpace(t)
+		k := FoldSubject(t)
+		if t == "" || k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		baru = append(baru, t)
+	}
+	sort.Strings(baru)
+	out = append(out, baru...)
+	return strings.Join(out, ", ")
+}

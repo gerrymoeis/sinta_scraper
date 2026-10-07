@@ -50,7 +50,21 @@ func TestUpdateJournalsE7(t *testing.T) {
 		t.Fatalf("garuda_url ulang: n=%d err=%v, want 0/<nil>", n, err)
 	}
 
-	// 5) field di luar whitelist → tolak.
+	// 5) E7f: print_issn & doaj_url (fill-only utk baris kosong) idempoten.
+	if n, err = st.UpdateJournalsE7(501, "print_issn", "14102331"); err != nil || n != 1 {
+		t.Fatalf("print_issn: n=%d err=%v, want 1/<nil>", n, err)
+	}
+	if n, err = st.UpdateJournalsE7(501, "print_issn", "14102331"); err != nil || n != 0 {
+		t.Fatalf("print_issn ulang: n=%d err=%v, want 0/<nil>", n, err)
+	}
+	if n, err = st.UpdateJournalsE7(501, "doaj_url", "https://doaj.org/toc/1410-2331"); err != nil || n != 1 {
+		t.Fatalf("doaj_url: n=%d err=%v, want 1/<nil>", n, err)
+	}
+	if n, err = st.UpdateJournalsE7(501, "doaj_url", "https://doaj.org/toc/1410-2331"); err != nil || n != 0 {
+		t.Fatalf("doaj_url ulang: n=%d err=%v, want 0/<nil>", n, err)
+	}
+
+	// 6) field di luar whitelist → tolak.
 	if _, err = st.UpdateJournalsE7(501, "name", "HACK"); err == nil {
 		t.Fatal("field name harus ditolak whitelist")
 	}
@@ -58,7 +72,7 @@ func TestUpdateJournalsE7(t *testing.T) {
 		t.Fatal("field content_hash harus ditolak whitelist")
 	}
 
-	// 6) nama asli j501 tak tersentuh.
+	// 7) nama asli j501 tak tersentuh.
 	var name string
 	if err = st.db.QueryRow(`SELECT name FROM journals WHERE id=501`).Scan(&name); err != nil || name != "Kosong" {
 		t.Fatalf("name j501 utuh: %q err=%v", name, err)

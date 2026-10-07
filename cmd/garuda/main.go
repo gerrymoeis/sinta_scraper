@@ -25,6 +25,10 @@
 //	-e7d : E7d — hyphen-sweep 16 DOAJ-miss E6 + DOAJ miss-8 (hyphen-first),
 //	      pagu 24 GET kumulatif, TANPA tulis db → e7d-results.json
 //	      (approve 6 Okt).
+//	-e7f : E7f — fill subject_area (fill + append dedup Opsi A), print_issn
+//	      (28) & doaj_url utk 41 dobel-kosong + spot-check TOC 1 — pagu 41+1
+//	      GET, TULIS (backup .preE7f + diff K1 + provenance), nol DDL
+//	      → e7f-results.json (approve 6 Okt).
 //	-wafsmoke : validasi integrasi hybrid (doc 35) — 1 GET penuh via Client.Get.
 //	-otismoke : probe A solver murni-Go (approve 4 Okt) — solve challenge via
 //	      browser bawaan-OS (chromedp) + 1 GET konfirmasi tls-client.
@@ -69,6 +73,7 @@ func main() {
 	e7b := flag.Bool("e7b", false, "E7b: sinkronisasi journals (fill subject 129 + overwrite garuda_url 9, backup+provenance+verifikasi) - TULIS, nol GET")
 	e7c := flag.Bool("e7c", false, "E7c: miss-8 multi-sumber LIVE (Crossref+OAI+view+Q3 DOAJ, Opsi A prov alt_*) - pagu 18 GET, TULIS prov")
 	e7d := flag.Bool("e7d", false, "E7d: hyphen-sweep 16 miss E6 + DOAJ miss-8 (hyphen-first, cross-check cek manual user) - pagu 24 GET, tanpa tulis db")
+	e7f := flag.Bool("e7f", false, "E7f: fill subject/print_issn/doaj_url 41 dobel-kosong + append miss-8 (pagu 41+1 GET, TULIS dgn backup+diff, nol DDL)")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -154,6 +159,13 @@ func main() {
 	if *e7d {
 		if err := runE7D(*dbPath, *e6DB2, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
 			fmt.Fprintf(os.Stderr, "e7d GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7f {
+		if err := runE7F(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e7f GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
