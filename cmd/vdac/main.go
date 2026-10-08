@@ -1,5 +1,5 @@
 // Program vdac: alat Eksperimen D (doc 23) — prototipe Verifier-Driven
-// Adaptive Crawl sesuai belajar/penting/analisa-eksperimen.md: pass global
+// Adaptive Crawl sesuai belajar/archive/penting/analisa-eksperimen.md: pass global
 // awal (sort awal, default 5) → fixpoint repair pada unstable region
 // (dupPages ±1, halaman frozen dikecualikan) → bila defisit masih tersisa,
 // sesi BARU dengan sort alternatif hanya pada region yang sama → verifikasi
