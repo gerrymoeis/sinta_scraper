@@ -171,6 +171,15 @@ func newTLSFetcher() (*tlsFetcher, error) {
 }
 
 func (t *tlsFetcher) get(rawURL, referer, ua, cookie string) (int, []byte, error) {
+	// Scheme http:// → tls-client (fhttp + profil TLS Chrome_152) MENOLAK
+	// cleartext dgn "http2: unsupported scheme" — fakta run E7gh 7 Okt 2026:
+	// 11 host http:// gagal total walau std GET jelas 403 (bug: jalur hybrid
+	// tak berguna utk plain http). TLS fingerprint memang tak relevan tanpa
+	// TLS → net/http std dgn header Chrome identik (WAF cleartext umumnya
+	// membandingkan header/UA, bukan ClientHello).
+	if u, err := url.Parse(rawURL); err == nil && u.Scheme == "http" {
+		return t.getCleartext(rawURL, referer, ua, cookie)
+	}
 	req, err := fhttp.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return 0, nil, err
@@ -188,6 +197,37 @@ func (t *tlsFetcher) get(rawURL, referer, ua, cookie string) (int, []byte, error
 		req.Header.Set("Cookie", cookie)
 	}
 	resp, err := t.cli.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("GET %s: %w", rawURL, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("baca body: %w", err)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// getCleartext = jalur hybrid utk scheme http:// via net/http std (lihat catatan
+// di get). Header disamakan persis dgn jalur fhttp.
+func (t *tlsFetcher) getCleartext(rawURL, referer, ua, cookie string) (int, []byte, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if ua == "" {
+		ua = chromeUA
+	}
+	req.Header.Set("User-Agent", ua)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "id-ID,id;q=0.9,en;q=0.8")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("GET %s: %w", rawURL, err)
 	}

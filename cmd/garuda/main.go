@@ -29,6 +29,11 @@
 //	      (28) & doaj_url utk 41 dobel-kosong + spot-check TOC 1 — pagu 41+1
 //	      GET, TULIS (backup .preE7f + diff K1 + provenance), nol DDL
 //	      → e7f-results.json (approve 6 Okt).
+//	-e7g : E7g — verifikasi 261 ojs_url (robots.txt per host + klasifikasi
+//	      status) + rantai repair kandidat (Garuda home → OpenAlex → DOAJ →
+//	      manual) — pagu 775 GET (175+300+300), TULIS journal_urls +
+//	      ojs_url dgn backup .preE7g + diff K1 + provenance, nol DDL
+//	      → e7g-results.json (pagu approve 7 Okt).
 //	-wafsmoke : validasi integrasi hybrid (doc 35) — 1 GET penuh via Client.Get.
 //	-otismoke : probe A solver murni-Go (approve 4 Okt) — solve challenge via
 //	      browser bawaan-OS (chromedp) + 1 GET konfirmasi tls-client.
@@ -74,6 +79,11 @@ func main() {
 	e7c := flag.Bool("e7c", false, "E7c: miss-8 multi-sumber LIVE (Crossref+OAI+view+Q3 DOAJ, Opsi A prov alt_*) - pagu 18 GET, TULIS prov")
 	e7d := flag.Bool("e7d", false, "E7d: hyphen-sweep 16 miss E6 + DOAJ miss-8 (hyphen-first, cross-check cek manual user) - pagu 24 GET, tanpa tulis db")
 	e7f := flag.Bool("e7f", false, "E7f: fill subject/print_issn/doaj_url 41 dobel-kosong + append miss-8 (pagu 41+1 GET, TULIS dgn backup+diff, nol DDL)")
+	e7g := flag.Bool("e7g", false, "E7g: verifikasi 261 ojs_url + robots.txt + rantai repair kandidat (pagu 775 GET, TULIS journal_urls+ojs_url dgn backup+diff, nol DDL)")
+	e7gh := flag.Bool("e7gh", false, "E7gh: EKSPERIMEN hybrid utk sisa E7g — waf/server + re-fetch robots host terblokir (pagu 100 Get, TANPA tulis db, arah user 7 Okt)")
+	e7gm := flag.Bool("e7gm", false, "E7gm: REVIEW+RETRY 7 baris manual E7g — https-prefer + timeout 120s (pagu 14 Get, arah user 8 Okt)")
+	e7ghw := flag.Bool("e7ghw", false, "E7ghw: TULIS 23 baris terverifikasi E7gh ke journal_urls (approve user 8 Okt; backup+diff K1, 0 GET)")
+	e7gw := flag.Bool("e7gw", false, "E7gw: TULIS 4 baris manual E7gm — ojs_url http→https (j390/j6008) + 4 row journal_urls (approve user 8 Okt; backup+diff K1, 0 GET)")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -166,6 +176,41 @@ func main() {
 	if *e7f {
 		if err := runE7F(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
 			fmt.Fprintf(os.Stderr, "e7f GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7g {
+		if err := runE7G(*dbPath, *fixtures, *refresh, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e7g GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7gh {
+		if err := runE7GH(*fixtures, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e7gh GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7gm {
+		if err := runE7GM(*fixtures, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e7gm GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7ghw {
+		if err := runE7GHW(*dbPath, *fixtures); err != nil {
+			fmt.Fprintf(os.Stderr, "e7ghw GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e7gw {
+		if err := runE7GW(*dbPath, *fixtures); err != nil {
+			fmt.Fprintf(os.Stderr, "e7gw GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return

@@ -376,3 +376,29 @@ func TestPickSolver(t *testing.T) {
 		t.Errorf("SINTA_SOLVER_IMPL=python bukan runSolver (ptr=%x)", got)
 	}
 }
+
+// tlsFetcher: scheme http:// (cleartext) wajib lewat getCleartext - tls-client
+// (fhttp + profil TLS) menolak cleartext dgn "http2: unsupported scheme"
+// (fakta run E7gh 7 Okt 2026: 11 host http:// gagal total walau std 403).
+func TestTLSFetcherCleartextHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") == "" {
+			t.Error("tanpa User-Agent")
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("Forbidden"))
+	}))
+	defer srv.Close()
+
+	f, err := newTLSFetcher()
+	if err != nil {
+		t.Fatalf("newTLSFetcher: %v", err)
+	}
+	st, body, err := f.get(srv.URL, "", chromeUA, "")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if st != http.StatusForbidden || string(body) != "Forbidden" {
+		t.Errorf("st=%d body=%q, want 403 Forbidden", st, body)
+	}
+}

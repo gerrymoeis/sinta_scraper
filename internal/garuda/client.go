@@ -120,6 +120,40 @@ func (c *Client) Get(rawURL, referer string) ([]byte, int, error) {
 // Solves = jumlah eksekusi solver utk client ini (observability -wafsmoke).
 func (c *Client) Solves() int { return c.hyb.Solves() }
 
+// maxBodyPlain = batas baca body GetPlain (4 MB) — cukup utk keputusan
+// hidup/matot tanpa menampung halaman raksasa.
+const maxBodyPlain = 4 << 20
+
+// GetPlain = GET tunggal TANPA retry & TANPA fallback hybrid (E7g — approve
+// user 7 Okt 2026): status apa pun (termasuk 403/429 WAF) dilaporkan apa
+// adanya — 403/429 BUKAN mati dan tak memicu solve browser; strategi retry
+// (1× transien) dipegang driver supaya pagu GET terkontrol per percobaan.
+// Mengembalikan final URL setelah redirect otomatis http.Client (untuk
+// kolom journal_urls.final_url). Limiter jeda global tetap dihormati.
+func (c *Client) GetPlain(rawURL, referer string) ([]byte, int, string, error) {
+	c.limiter.Wait()
+	req, err := sinta.NewGET(rawURL, c.ua, referer)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, "", err // jaringan/redirect-loop → status 0
+	}
+	defer resp.Body.Close()
+	final := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL.String()
+	}
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxBodyPlain))
+	if rerr != nil {
+		// status tetap dikembalikan: server sudah menjawab (keputusan hidup
+		// tetap bisa dibuat dari status)
+		return nil, resp.StatusCode, final, fmt.Errorf("baca body: %w", rerr)
+	}
+	return body, resp.StatusCode, final, nil
+}
+
 // SearchURL membangun URL /journal?q=… (+page bila >1).
 func SearchURL(q string, page int) string {
 	u := "https://garuda.kemdiktisaintek.go.id/journal?q=" + url.QueryEscape(q)
