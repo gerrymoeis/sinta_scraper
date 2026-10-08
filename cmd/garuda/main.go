@@ -84,6 +84,7 @@ func main() {
 	e7gm := flag.Bool("e7gm", false, "E7gm: REVIEW+RETRY 7 baris manual E7g — https-prefer + timeout 120s (pagu 14 Get, arah user 8 Okt)")
 	e7ghw := flag.Bool("e7ghw", false, "E7ghw: TULIS 23 baris terverifikasi E7gh ke journal_urls (approve user 8 Okt; backup+diff K1, 0 GET)")
 	e7gw := flag.Bool("e7gw", false, "E7gw: TULIS 4 baris manual E7gm — ojs_url http→https (j390/j6008) + 4 row journal_urls (approve user 8 Okt; backup+diff K1, 0 GET)")
+	e8b := flag.Bool("e8b", false, "E8b Opsi B satu run: resolve 3 view + fill subject 17 via view (pagu 30 GET, TULIS backup+diff K1, approve 8 Okt)")
 	refresh := flag.Bool("refresh", false, "abaikan resume — ulang semua request")
 	delayMin := flag.Duration("delay-min", time.Second, "jeda acak minimum antar request")
 	delayMax := flag.Duration("delay-max", 2*time.Second, "jeda acak maksimum antar request")
@@ -211,6 +212,13 @@ func main() {
 	if *e7gw {
 		if err := runE7GW(*dbPath, *fixtures); err != nil {
 			fmt.Fprintf(os.Stderr, "e7gw GAGAL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *e8b {
+		if err := runE8B(*dbPath, *fixtures, *delayMin, *delayMax); err != nil {
+			fmt.Fprintf(os.Stderr, "e8b GAGAL: %v\n", err)
 			os.Exit(1)
 		}
 		return
