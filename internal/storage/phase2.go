@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -23,10 +24,18 @@ type HarvestTarget struct {
 
 // HarvestTargets seluruh jurnal urut id.
 func (s *Store) HarvestTargets() ([]HarvestTarget, error) {
+	return s.HarvestTargetsRank(nil)
+}
+
+// HarvestTargetsRank = HarvestTargets terfilter sinta_rank (rankWhere:
+// ranks nil/kosong = tanpa filter — ParseRankSet "all" → nil) — scope
+// stage garuda produksi (-rank), doc 40.
+func (s *Store) HarvestTargetsRank(ranks []int) ([]HarvestTarget, error) {
+	where, args := rankWhere(ranks)
 	rows, err := s.db.Query(`
 		SELECT id, name, COALESCE(electronic_issn, ''), COALESCE(print_issn, ''),
 		       COALESCE(subject_area, '')
-		FROM journals ORDER BY id`)
+		FROM journals`+where+` ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -313,4 +322,119 @@ func (s *Store) SetSubjectCanonical(journalID int64, canonical string) error {
 		return fmt.Errorf("canonical: tulis journal %d: %w", journalID, err)
 	}
 	return nil
+}
+
+// rankWhere membangun klausul WHERE sinta_rank IN (…) utk scope -rank
+// (ranks nil/kosong = tanpa filter — ParseRankSet "all" → nil). Placeholder
+// "?" meniru pola sqlite.go (JournalListByRank); args kembali urut dgn
+// placeholder.
+func rankWhere(ranks []int) (string, []any) {
+	if len(ranks) == 0 {
+		return "", nil
+	}
+	ph := make([]string, 0, len(ranks))
+	args := make([]any, 0, len(ranks))
+	for _, r := range ranks {
+		ph = append(ph, "?")
+		args = append(args, r)
+	}
+	return ` WHERE sinta_rank IN (` + strings.Join(ph, ",") + `)`, args
+}
+
+// SyncTarget = bahan sinkronisasi fill-if-absent Tahap 2 → journals
+// (sub-fase 3 stage garuda — doc 40).
+type SyncTarget struct {
+	ID        int64
+	SubjNow   string // journals.subject_area sekarang
+	Canonical string // journal_enrichment.subject_area_canonical (kosong = belum)
+	URLNow    string // journals.garuda_url sekarang
+	URLCap    string // journal_enrichment.garuda_url (capture match; kosong = belum matched)
+}
+
+// SyncTargets seluruh baris scope utk sub-fase sync (LEFT JOIN — baris
+// tanpa enrichment tetap ada dgn nilai kosong).
+func (s *Store) SyncTargets(ranks []int) ([]SyncTarget, error) {
+	where, args := rankWhere(ranks)
+	rows, err := s.db.Query(`
+		SELECT j.id, COALESCE(j.subject_area, ''), COALESCE(e.subject_area_canonical, ''),
+		       COALESCE(j.garuda_url, ''), COALESCE(e.garuda_url, '')
+		FROM journals j
+		LEFT JOIN journal_enrichment e ON e.journal_id = j.id`+where+` ORDER BY j.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SyncTarget
+	for rows.Next() {
+		var t SyncTarget
+		if err := rows.Scan(&t.ID, &t.SubjNow, &t.Canonical, &t.URLNow, &t.URLCap); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ViewTarget = baris sub-fase view (matched dgn garuda_id — stage opsi B,
+// doc 40). Resume: flag VIEW_DONE (terminal) atau link sudah ada.
+type ViewTarget struct {
+	ID       int64
+	GarudaID int64
+	ViewDone bool   // flag VIEW_DONE — halaman sudah di-fetch (found/notfound/tanpa link)
+	LinkNow  bool   // garuda_home_url / garuda_oai_url sudah terisi
+	SubjNow  string // journals.subject_area sekarang (guard fill-if-absent)
+	PrintNow string // journals.print_issn sekarang (guard fill-if-absent)
+}
+
+// ViewTargets = matched dgn garuda_id dalam scope -rank, urut id.
+func (s *Store) ViewTargets(ranks []int) ([]ViewTarget, error) {
+	where, args := rankWhere(ranks)
+	if where == "" {
+		where = ` WHERE`
+	} else {
+		where += ` AND`
+	}
+	rows, err := s.db.Query(`
+		SELECT j.id, e.garuda_id,
+		       CASE WHEN COALESCE(p.flags, '') LIKE '%VIEW_DONE%' THEN 1 ELSE 0 END,
+		       CASE WHEN COALESCE(e.garuda_home_url, '') <> '' OR COALESCE(e.garuda_oai_url, '') <> '' THEN 1 ELSE 0 END,
+		       COALESCE(j.subject_area, ''), COALESCE(j.print_issn, '')
+		FROM journals j
+		JOIN journal_enrichment e ON e.journal_id = j.id
+		LEFT JOIN phase2_progress p ON p.journal_id = j.id`+where+`
+			e.match_status = 'matched' AND COALESCE(e.garuda_id, 0) <> 0
+		ORDER BY j.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ViewTarget
+	for rows.Next() {
+		var t ViewTarget
+		var done, link int
+		if err := rows.Scan(&t.ID, &t.GarudaID, &done, &link, &t.SubjNow, &t.PrintNow); err != nil {
+			return nil, err
+		}
+		t.ViewDone, t.LinkNow = done == 1, link == 1
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// CountMatchStatus = jumlah baris scope dgn match_status terisi — verifikasi
+// akhir stage: setiap target wajib punya keputusan jujur (matched/not_found/
+// ambiguous), kecuali harvest error yang checkpoint-nya belum ditandai.
+func (s *Store) CountMatchStatus(ranks []int) (int, error) {
+	where, args := rankWhere(ranks)
+	if where == "" {
+		where = ` WHERE`
+	} else {
+		where += ` AND`
+	}
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM journals j
+		JOIN journal_enrichment e ON e.journal_id = j.id`+where+`
+			COALESCE(e.match_status, '') <> ''`, args...).Scan(&n)
+	return n, err
 }

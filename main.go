@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sinta-scraper/internal/garuda"
 	"sinta-scraper/internal/metrics"
 	"sinta-scraper/internal/sinta"
 	"sinta-scraper/internal/storage"
@@ -19,7 +20,7 @@ import (
 
 func main() {
 	// Seleksi apa yang di scrape
-	stages := flag.String("stages", "all", "stage pipeline, dipisah koma: sinta,ojs,pdf,all")
+	stages := flag.String("stages", "sinta", "stage pipeline, dipisah koma: sinta,garuda,ojs,pdf | all (semua token)")
 	rank := flag.String("rank", "1", "filter SINTA: 1-6 | rentang A-B (mis. 1-3) | daftar (mis. 1,5 — di PowerShell WAJIB kutip: -rank \"1,5\") | all")
 	year := flag.String("year", "latest", "filter tahun issue OJS: latest | tahun (2024) | all")
 	latestVol := flag.String("latest-vol", "1", "jumlah volume terbaru dari cakupan -year: angka (1) | all")
@@ -166,15 +167,23 @@ func main() {
 	runKey := sinta.RunKeyFor(*filterData, *extraQuery, *rank)
 	var stageErr error
 	var sintaRes *sinta.StageResult
+	var garudaRes *garuda.StageReport
 	var stageDur time.Duration
 
-	if stagesInclude(*stages, "sinta") {
-		store, err := storage.Open(*dbPath)
+	// Satu handle db dipakai bersama stage yang membutuhkan (sinta+garuda)
+	// — storage.Open otomatis DDL tabel Tahap 2 (phase2_progress dsb) utk
+	// stage garuda pada db mana pun (doc 40).
+	var store *storage.Store
+	if stagesInclude(*stages, "sinta") || stagesInclude(*stages, "garuda") {
+		s, err := storage.Open(*dbPath)
 		if err != nil {
 			log.Fatalf("GAGAL: buka db: %v", err)
 		}
+		store = s
 		defer store.Close()
+	}
 
+	if stagesInclude(*stages, "sinta") {
 		sess, err := sinta.NewSession("sinta", *userAgent, *minDelay, *maxDelay)
 		if err != nil {
 			log.Fatalf("GAGAL: buat session: %v", err)
@@ -240,6 +249,47 @@ func main() {
 
 	if stagesInclude(*stages, "ojs") || stagesInclude(*stages, "pdf") {
 		log.Println("[info] stage ojs/pdf belum diimplementasi (Fase C/D) — dilewati pada build ini")
+	}
+
+	// ── Stage garuda (Q4 §9.1: wiring logika internal/garuda — doc 40) ─
+	if stagesInclude(*stages, "garuda") {
+		ranks, err := sinta.ParseRankSet(*rank)
+		if err != nil {
+			log.Fatalf("GAGAL: %v", err)
+		}
+		if ranks == nil {
+			log.Printf("stage garuda: scope rank=all | refresh=%v | fixtures=%s",
+				*refresh, filepath.Join(filepath.Dir(*logPath), "garuda"))
+		} else {
+			log.Printf("stage garuda: scope rank=%v | refresh=%v | fixtures=%s",
+				ranks, *refresh, filepath.Join(filepath.Dir(*logPath), "garuda"))
+		}
+		gStart := time.Now()
+		garudaRes, err = garuda.RunGarudaStage(store, garuda.StageConfig{
+			Ranks:       ranks,
+			Refresh:     *refresh,
+			UserAgent:   *userAgent,
+			MinDelay:    *minDelay,
+			MaxDelay:    *maxDelay,
+			FixturesDir: filepath.Join(filepath.Dir(*logPath), "garuda"),
+			Logf:        log.Printf,
+		})
+		log.Printf("stage garuda durasi: %.1fs", time.Since(gStart).Seconds())
+		switch {
+		case err != nil:
+			log.Printf("stage garuda GAGAL: %v", err)
+			if stageErr == nil {
+				stageErr = err
+			}
+		case !garudaRes.Verified:
+			log.Printf("stage garuda BELUM LENGKAP: %s", garudaRes.VerifyMsg)
+			log.Printf("jalankan ulang command yang sama — resume mengulang hanya sub-fase yang gagal")
+			if stageErr == nil {
+				stageErr = fmt.Errorf("stage garuda belum lengkap: %s", garudaRes.VerifyMsg)
+			}
+		}
+	} else {
+		log.Println("stage garuda tidak diminta (-stages), dilewati")
 	}
 
 	log.Print(metrics.Default.Report())
@@ -349,8 +399,28 @@ func main() {
 	} else {
 		log.Print("[RINGKASAN] stage sinta : tidak ada hasil (lihat error/GAGAL di atas)")
 	}
+	if garudaRes != nil {
+		h, m := garudaRes.Harvest, garudaRes.Map
+		log.Printf("[RINGKASAN] garuda   : target %d | matched %d | not_found %d | ambiguous %d | harvest_error %d | skip %d",
+			garudaRes.Target, h.Matched, h.NotFound, h.Ambiguous, h.Errors, h.Skipped)
+		log.Printf("[RINGKASAN] garuda   : canonical terisi %d | sync subject %d url %d (beda %d) | view proses %d skip %d not_found %d link %d subject %d print %d error %d",
+			m.Filled, garudaRes.SyncSubject, garudaRes.SyncURL, garudaRes.SyncURLBeda,
+			garudaRes.ViewProses, garudaRes.ViewSkip, garudaRes.ViewNotFound, garudaRes.ViewLink,
+			garudaRes.ViewSubj, garudaRes.ViewPrint, garudaRes.ViewErr)
+		verif := "GAGAL"
+		if garudaRes.Verified {
+			verif = "VERIFIED_COMPLETE"
+		}
+		log.Printf("[RINGKASAN] garuda   : verifikasi %s — %s", verif, garudaRes.VerifyMsg)
+	} else if stagesInclude(*stages, "garuda") {
+		log.Print("[RINGKASAN] garuda   : tidak ada hasil (lihat error/GAGAL di atas)")
+	}
 	if st, ok := metrics.Default.Export()["sinta"]; ok && st.Requests > 0 {
 		log.Printf("[RINGKASAN] http     : %d request | %.2f MB | avg %.0fms p95 %.0fms",
+			st.Requests, float64(st.Bytes)/(1024*1024), st.Latency.Avg, st.Latency.P95)
+	}
+	if st, ok := metrics.Default.Export()["garuda"]; ok && st.Requests > 0 {
+		log.Printf("[RINGKASAN] http/garuda: %d request | %.2f MB | avg %.0fms p95 %.0fms",
 			st.Requests, float64(st.Bytes)/(1024*1024), st.Latency.Avg, st.Latency.P95)
 	}
 	log.Printf("[RINGKASAN] output   : %s", *dbPath)
@@ -371,12 +441,12 @@ func validStages(v string) error {
 	if v == "all" {
 		return nil
 	}
-	valid := map[string]bool{"sinta": true, "ojs": true, "pdf": true}
+	valid := map[string]bool{"sinta": true, "garuda": true, "ojs": true, "pdf": true}
 	seen := map[string]bool{}
 	for _, tok := range strings.Split(v, ",") {
 		tok = strings.TrimSpace(tok)
 		if !valid[tok] {
-			return fmt.Errorf("-stages tidak valid: %q (pakai sinta,ojs,pdf | all)", tok)
+			return fmt.Errorf("-stages tidak valid: %q (pakai sinta,garuda,ojs,pdf | all)", tok)
 		}
 		if seen[tok] {
 			return fmt.Errorf("-stages stage %q duplikat", tok)
