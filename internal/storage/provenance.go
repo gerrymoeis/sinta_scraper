@@ -22,6 +22,8 @@ type ProvEntry struct {
 // openalex ditambah E7g (approve user 7 Okt 2026 — rantai repair doc 17 §4.2).
 // e7gm ditambah E7gw (approve user 8 Okt 2026 — ojs_url http→https hasil
 // retry 4 baris manual; asal nilai = driver E7gm, bukan klik manual).
+// ojs ditambah F3.3 (approve user 13 Okt 2026 — driver stage ojs menulis
+// provenance journals_author_fees dari halaman policy canonical).
 var provSources = map[string]bool{
 	"sinta":    true,
 	"garuda":   true,
@@ -31,6 +33,7 @@ var provSources = map[string]bool{
 	"manual":   true,
 	"openalex": true,
 	"e7gm":     true,
+	"ojs":      true,
 }
 
 // MergeProvenance menulis/menimpa SATU field pada JSON provenance milik

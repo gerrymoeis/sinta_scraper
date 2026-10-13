@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sinta-scraper/internal/garuda"
 	"sinta-scraper/internal/metrics"
+	"sinta-scraper/internal/ojs"
 	"sinta-scraper/internal/sinta"
 	"sinta-scraper/internal/storage"
 	"strconv"
@@ -170,11 +171,11 @@ func main() {
 	var garudaRes *garuda.StageReport
 	var stageDur time.Duration
 
-	// Satu handle db dipakai bersama stage yang membutuhkan (sinta+garuda)
+	// Satu handle db dipakai bersama stage yang membutuhkan (sinta+garuda+ojs)
 	// — storage.Open otomatis DDL tabel Tahap 2 (phase2_progress dsb) utk
-	// stage garuda pada db mana pun (doc 40).
+	// stage garuda/ojs pada db mana pun (doc 40 + doc 42 F3.4).
 	var store *storage.Store
-	if stagesInclude(*stages, "sinta") || stagesInclude(*stages, "garuda") {
+	if stagesInclude(*stages, "sinta") || stagesInclude(*stages, "garuda") || stagesInclude(*stages, "ojs") {
 		s, err := storage.Open(*dbPath)
 		if err != nil {
 			log.Fatalf("GAGAL: buka db: %v", err)
@@ -247,8 +248,49 @@ func main() {
 		log.Println("stage sinta tidak diminta (-stages), dilewati")
 	}
 
-	if stagesInclude(*stages, "ojs") || stagesInclude(*stages, "pdf") {
-		log.Println("[info] stage ojs/pdf belum diimplementasi (Fase C/D) — dilewati pada build ini")
+	if stagesInclude(*stages, "ojs") {
+		ranks, err := sinta.ParseRankSet(*rank)
+		if err != nil {
+			log.Fatalf("GAGAL: %v", err)
+		}
+		if ranks == nil {
+			log.Printf("stage ojs: scope rank=all | refresh=%v", *refresh)
+		} else {
+			log.Printf("stage ojs: scope rank=%v | refresh=%v", ranks, *refresh)
+		}
+		ojsStart := time.Now()
+		ojsRes, ojsErr := ojs.RunOJSStage(store, ojs.StageConfig{
+			Ranks:      ranks,
+			Refresh:    *refresh,
+			Client:     garuda.NewClient("ojs", *userAgent, *minDelay, *maxDelay),
+			RetryDelay: 2 * time.Second,
+			Logf:       log.Printf,
+		})
+		log.Printf("stage ojs durasi: %.1fs", time.Since(ojsStart).Seconds())
+		switch {
+		case ojsErr != nil:
+			log.Printf("stage ojs GAGAL: %v", ojsErr)
+			if stageErr == nil {
+				stageErr = ojsErr
+			}
+		case !ojsRes.Verified:
+			log.Printf("stage ojs BELUM LENGKAP: %s", ojsRes.VerifyMsg)
+			log.Printf("jalankan ulang command yang sama — resume mengulang hanya jurnal tanpa SOURCE_RESOLVED")
+			if stageErr == nil {
+				stageErr = fmt.Errorf("stage ojs belum lengkap: %s", ojsRes.VerifyMsg)
+			}
+		}
+		if ojsRes != nil {
+			log.Printf("[RINGKASAN] ojs      : target=%d skip=%d resolved=%d no_candidate=%d no_canonical=%d unreachable=%d fees=%d no_fee_page=%d policy_get=%d policy_err=%d",
+				ojsRes.Target, ojsRes.Skip, ojsRes.Resolved, ojsRes.NoCandidate, ojsRes.NoCanonical, ojsRes.Unreachable,
+				ojsRes.FeesFound, ojsRes.NoFeePage, ojsRes.PolicyGET, ojsRes.PolicyErr)
+			log.Printf("[RINGKASAN] ojs      : verifikasi %s", ojsRes.VerifyMsg)
+		}
+	} else {
+		log.Println("stage ojs tidak diminta (-stages), dilewati")
+	}
+	if stagesInclude(*stages, "pdf") {
+		log.Println("[info] stage pdf belum diimplementasi (Fase D) — dilewati pada build ini")
 	}
 
 	// ── Stage garuda (Q4 §9.1: wiring logika internal/garuda — doc 40) ─

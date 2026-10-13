@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS journals (
 	scopus_url TEXT,
 	garuda_url TEXT,
 	doaj_url TEXT,
+	author_fees TEXT, -- Fase 3 K6-A (doc 42 §11.3): JSON Opsi C {submission, review, publish[], raw, source_url}; kolom BARU (raw Tahap 1 tak disentuh)
 	impact REAL,
 	h5_index INTEGER,
 	citations_last_5_years INTEGER,
@@ -124,6 +125,8 @@ CREATE TABLE IF NOT EXISTS journal_source_profile (
 	policy_urls         TEXT,
 	pdf_strategy        TEXT,
 	detection_evidence  TEXT,
+	platform_confidence TEXT, -- high|medium (doc 42 §11.1; high = ≥2 marker, medium = 1)
+	ojs_version_hint    TEXT, -- nullable — dari body bila terbaca (belum dipaksa P2)
 	detected_at         TEXT
 );
 
@@ -134,6 +137,21 @@ CREATE TABLE IF NOT EXISTS phase2_progress (
 	flags      TEXT DEFAULT '{}',
 	updated_at TEXT NOT NULL,
 	last_error TEXT
+);
+
+-- 3.5 halaman policy per tipe (Fase 3 — doc 42 §11.2): baris per tipe, bukan
+-- kolom pivot (bukti P3 j681: 4 tipe berlapis di 1 halaman Submissions).
+-- http_status jujur (403 WAF tetap tercatat); raw_snippet nullable (audit);
+-- UNIQUE(journal_id, policy_type, url) → idempoten saat rerun.
+CREATE TABLE IF NOT EXISTS journal_policy (
+	id           INTEGER PRIMARY KEY,
+	journal_id   INTEGER NOT NULL REFERENCES journals(id),
+	policy_type  TEXT    NOT NULL, -- about|author_guideline|copyright|privacy|fee|other
+	url          TEXT    NOT NULL,
+	http_status  INTEGER,
+	raw_snippet  TEXT,
+	checked_at   TEXT,
+	UNIQUE(journal_id, policy_type, url)
 );
 
 -- 3.6 kamus subject (Q3, doc 30 §13.3): term sumber → kanonik. DIBUAT
@@ -206,7 +224,40 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("gagal migrasi kolom view E3: %w", err)
 	}
 
+	// Fase 3 F3.2 (doc 42 §11 K6-A): kolom fee & profil sumber — db kerja
+	// Tahap 2 dibuat sebelum K6 → ALTER idempoten; db baru sudah punya
+	// lewat CREATE TABLE. journal_policy ikut schema (CREATE IF NOT EXISTS).
+	if err := addF32Columns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("gagal migrasi kolom Fase 3: %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// addF32Columns menambah kolom Fase 3 bila belum ada (migrasi ALTER idempoten
+// utk db kerja yang dibuat sebelum K6-A; doc 42 §11).
+func addF32Columns(db *sql.DB) error {
+	for _, m := range []struct{ tabel, deklarasi string }{
+		{"journals", "author_fees TEXT"},
+		{"journal_source_profile", "platform_confidence TEXT"},
+		{"journal_source_profile", "ojs_version_hint TEXT"},
+	} {
+		kolom := strings.Fields(m.deklarasi)[0]
+		var n int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('`+m.tabel+`') WHERE name = ?`,
+			kolom,
+		).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec(`ALTER TABLE ` + m.tabel + ` ADD COLUMN ` + m.deklarasi); err != nil {
+				return fmt.Errorf("ALTER %s.%s: %w", m.tabel, kolom, err)
+			}
+		}
+	}
+	return nil
 }
 
 // addQ4ViewColumns menambah garuda_home_url & garuda_oai_url ke
