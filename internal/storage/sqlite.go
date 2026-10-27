@@ -130,6 +130,57 @@ CREATE TABLE IF NOT EXISTS journal_source_profile (
 	detected_at         TEXT
 );
 
+-- 3.7 statistik volume/jurnal (doc 41 §13.7 K6 REVISED — approve user 14 Okt):
+-- 1 baris per jurnal (pola journal_enrichment). Hybrid per-field per-sumber:
+-- archive = issue links SEMUA tahun; Crossref = date/anchor/volno (93-100%);
+-- TOC = D2 count utk jendela. issues = JSON raw auditable (field nullable —
+-- jujur bila tak ter-parse); is_complete=0 bila parsial (retry resume).
+CREATE TABLE IF NOT EXISTS journal_volume_stats (
+	journal_id              INTEGER PRIMARY KEY REFERENCES journals(id),
+	anchor_year             INTEGER,             -- max(Crossref-year, archive-year issue terbaru) — gap-A
+	window_start            INTEGER,             -- V3: anchor_year-2
+	window_end              INTEGER,             -- = anchor_year
+	vol_per_year_avg        REAL,                -- D1 agregat dlm jendela
+	articles_per_volume_avg REAL,                -- D2 agregat dlm jendela (TOC primer)
+	release_months          TEXT,                -- D3 "2,6,10" — min(bulan date artikel) per issue (refine-D)
+	issues                  TEXT NOT NULL DEFAULT '[]',
+	source                  TEXT,                -- ojs|crossref — non-OJS/OJS-tanpa-archive derive
+	is_complete             INTEGER,             -- 1 = final; 0 = parsial (resume: retry)
+	provenance              TEXT NOT NULL DEFAULT '{}',
+	retrieved_at            TEXT,
+	UNIQUE(journal_id)
+);
+
+-- 3.8 korpus artikel (doc 43 §5.2 — spec di-approve user 14 Okt): 1 baris
+-- per artikel volume terakhir (scope -vol-n). abstrak split id/en (dwibahasa
+-- novelty) · language id|en|mixed|unknown · keywords_json = author|crossref|
+-- tfidf (JSON auditable) · license_status 4 kelas open|free_not_open|paid|
+-- unknown (Fase 3.5 utk unknown) · is_complete=0 = parsial → resume retry.
+CREATE TABLE IF NOT EXISTS articles (
+	id             INTEGER PRIMARY KEY AUTOINCREMENT,
+	journal_id     INTEGER NOT NULL REFERENCES journals(id),
+	record_id      TEXT    NOT NULL,           -- OAI identifier / URL landing — kunci unik per jurnal
+	volume_no      INTEGER,                    -- citation OAI (nullable — gagal parse = jujur)
+	issue_no       INTEGER,
+	year           INTEGER,
+	title          TEXT    NOT NULL,
+	doi            TEXT,                       -- NULL bila tanpa DOI
+	article_url    TEXT    NOT NULL,
+	abstract_id    TEXT,                       -- abstrak Indonesia (NULL bila tak ada)
+	abstract_en    TEXT,                       -- abstrak English (NULL bila tak ada)
+	language       TEXT    NOT NULL,           -- id|en|mixed|unknown
+	keywords_json  TEXT,                       -- [{"kw","src":"author|crossref|tfidf","lang"}]
+	license_status TEXT    NOT NULL,           -- open|free_not_open|paid|unknown
+	license_url    TEXT,                       -- URL CC / hak cipta (audit)
+	source         TEXT    NOT NULL,           -- oai|crossref|doaj|landing (C3b: API sbg primer bila OAI gagal)
+	is_complete    INTEGER NOT NULL DEFAULT 0, -- 1 = artikel terisi penuh utk scope vol
+	provenance     TEXT    NOT NULL DEFAULT '{}',
+	retrieved_at   TEXT,
+	UNIQUE(journal_id, record_id)
+);
+CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi);
+CREATE INDEX IF NOT EXISTS idx_articles_kw  ON articles(journal_id);
+
 -- 3.4 resume/state per-jurnal Tahap 2 (pola checkpoint terbukti).
 CREATE TABLE IF NOT EXISTS phase2_progress (
 	journal_id INTEGER PRIMARY KEY REFERENCES journals(id),

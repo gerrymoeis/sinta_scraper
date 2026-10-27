@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sinta-scraper/internal/corpus"
 	"sinta-scraper/internal/garuda"
 	"sinta-scraper/internal/metrics"
 	"sinta-scraper/internal/ojs"
 	"sinta-scraper/internal/sinta"
 	"sinta-scraper/internal/storage"
+	"sinta-scraper/internal/volume"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +27,9 @@ func main() {
 	rank := flag.String("rank", "1", "filter SINTA: 1-6 | rentang A-B (mis. 1-3) | daftar (mis. 1,5 — di PowerShell WAJIB kutip: -rank \"1,5\") | all")
 	year := flag.String("year", "latest", "filter tahun issue OJS: latest | tahun (2024) | all")
 	latestVol := flag.String("latest-vol", "1", "jumlah volume terbaru dari cakupan -year: angka (1) | all")
+	volN := flag.Int("vol-n", 1, "scope stage corpus: jumlah volume TERAKHIR per jurnal (1 = terbaru, 2 = dua volume terakhir, dst) — doc 43 §5.1")
+	oaiMaxPages := flag.Int("oai-max-pages", corpus.DefaultMaxPages, "cap halaman resumption OAI ListRecords per jurnal (safety; O-C4 — naikkan bila log: resumption > N halaman cap safety)")
+	journalIDs := flag.String("journal", "", "scope stage corpus: daftar ID jurnal (mis. 673,689 — di PowerShell WAJIB kutip) | kosong = semua — utk smoke C6 & re-run per jurnal (doc 43 §5.7)")
 	// Teknis bagaimana scrape berjalan
 	workers := flag.Int("workers", 4, "jumlah worker goroutine")
 	minDelay := flag.Duration("min-delay", 1*time.Second, "delay minimum global antar request")
@@ -73,6 +78,8 @@ func main() {
 		validRank(*rank),
 		validYear(*year),
 		validLatestVol(*latestVol),
+		validVolN(*volN),
+		validOAIMaxPages(*oaiMaxPages),
 	} {
 		if err != nil {
 			log.Fatalf("GAGAL: %v", err)
@@ -171,11 +178,14 @@ func main() {
 	var garudaRes *garuda.StageReport
 	var stageDur time.Duration
 
-	// Satu handle db dipakai bersama stage yang membutuhkan (sinta+garuda+ojs)
-	// — storage.Open otomatis DDL tabel Tahap 2 (phase2_progress dsb) utk
-	// stage garuda/ojs pada db mana pun (doc 40 + doc 42 F3.4).
+	// Satu handle db dipakai bersama stage yang membutuhkan (sinta+garuda+ojs
+	// +volume+corpus) — storage.Open otomatis DDL tabel Tahap 2 (phase2_progress
+	// dsb) utk stage garuda/ojs pada db mana pun (doc 40 + doc 42 F3.4) +
+	// tabel articles utk corpus (doc 43 §5.2). TEMUAN G9 C6: condition lama
+	// lupa volume+corpus → store=nil → panic saat stage tsb dijalankan sendiri.
 	var store *storage.Store
-	if stagesInclude(*stages, "sinta") || stagesInclude(*stages, "garuda") || stagesInclude(*stages, "ojs") {
+	if stagesInclude(*stages, "sinta") || stagesInclude(*stages, "garuda") || stagesInclude(*stages, "ojs") ||
+		stagesInclude(*stages, "volume") || stagesInclude(*stages, "corpus") {
 		s, err := storage.Open(*dbPath)
 		if err != nil {
 			log.Fatalf("GAGAL: buka db: %v", err)
@@ -289,6 +299,125 @@ func main() {
 	} else {
 		log.Println("stage ojs tidak diminta (-stages), dilewati")
 	}
+
+	// ── Stage volume (doc 41 §13.7 K6 REVISED — driver Tahap 3) ─
+	if stagesInclude(*stages, "volume") {
+		ranks, err := sinta.ParseRankSet(*rank)
+		if err != nil {
+			log.Fatalf("GAGAL: %v", err)
+		}
+		if ranks == nil {
+			log.Printf("stage volume: scope rank=all | refresh=%v", *refresh)
+		} else {
+			log.Printf("stage volume: scope rank=%v | refresh=%v", ranks, *refresh)
+		}
+		volStart := time.Now()
+		volRes, volErr := volume.RunVolumeStage(store, volume.StageConfig{
+			Ranks:          ranks,
+			Refresh:        *refresh,
+			Client:         garuda.NewClient("volume", *userAgent, *minDelay, *maxDelay),
+			RetryDelay:     2 * time.Second,
+			CrossrefMailto: "gerry.23164@mhs.unesa.ac.id",
+			Logf:           log.Printf,
+		})
+		log.Printf("stage volume durasi: %.1fs", time.Since(volStart).Seconds())
+		switch {
+		case volErr != nil:
+			log.Printf("stage volume GAGAL: %v", volErr)
+			if stageErr == nil {
+				stageErr = volErr
+			}
+		case !volRes.Verified:
+			log.Printf("stage volume BELUM LENGKAP: %s", volRes.VerifyMsg)
+			log.Printf("jalankan ulang command yang sama — resume mengulang hanya jurnal tanpa is_complete=1")
+			if stageErr == nil {
+				stageErr = fmt.Errorf("stage volume belum lengkap: %s", volRes.VerifyMsg)
+			}
+		}
+		if volRes != nil {
+			log.Printf("[RINGKASAN] volume  : target=%d skip=%d processed=%d partial=%d err=%d no_canonical=%d no_issn=%d archive_get=%d crossref_get=%d toc_get=%d",
+				volRes.Target, volRes.Skip, volRes.Processed, volRes.Partial, volRes.Err,
+				volRes.NoCanonical, volRes.NoISSN, volRes.ArchiveGET, volRes.CrossrefGET, volRes.TOCGET)
+			log.Printf("[RINGKASAN] volume  : verifikasi %s", volRes.VerifyMsg)
+		}
+	} else {
+		log.Println("stage volume tidak diminta (-stages), dilewati")
+	}
+
+	// ── Stage corpus PASS 1 (doc 43 §5.3 — driver Tahap 3 rekomendasi) ──
+	if stagesInclude(*stages, "corpus") {
+		ranks, err := sinta.ParseRankSet(*rank)
+		if err != nil {
+			log.Fatalf("GAGAL: %v", err)
+		}
+		jids, jerr := parseJournalIDs(*journalIDs)
+		if jerr != nil {
+			log.Fatalf("GAGAL: %v", jerr)
+		}
+		log.Printf("stage corpus: scope rank=%v | journal=%v | vol-n=%d | oai-max-pages=%d | refresh=%v", ranks, jids, *volN, *oaiMaxPages, *refresh)
+		cStart := time.Now()
+		cg := garuda.NewClient("corpus", *userAgent, *minDelay, *maxDelay)
+		corpusRes, corpusErr := corpus.RunCorpusStage(store, corpus.StageConfig{
+			Ranks:          ranks,
+			Refresh:        *refresh,
+			VolN:           *volN,
+			MaxPages:       *oaiMaxPages,
+			JournalIDs:     jids,
+			Client:         cg,
+			Solver:         cg, // C3b-C: 403/468 → Get (tls-client + BrowserSolve) — HANYA bila SolverMode (fallback terakhir)
+			RetryDelay:     2 * time.Second,
+			CrossrefMailto: "gerry.23164@mhs.unesa.ac.id",
+			Logf:           log.Printf,
+		})
+		log.Printf("stage corpus durasi: %.1fs", time.Since(cStart).Seconds())
+		switch {
+		case corpusErr != nil:
+			log.Printf("stage corpus GAGAL: %v", corpusErr)
+			if stageErr == nil {
+				stageErr = corpusErr
+			}
+		case !corpusRes.Verified:
+			log.Printf("stage corpus BELUM LENGKAP: %s", corpusRes.VerifyMsg)
+			log.Printf("jalankan ulang command yang sama — resume mengulang hanya jurnal tanpa artikel complete")
+			if stageErr == nil {
+				stageErr = fmt.Errorf("stage corpus belum lengkap: %s", corpusRes.VerifyMsg)
+			}
+		}
+		if corpusRes != nil {
+			log.Printf("[RINGKASAN] corpus  : target=%d skip=%d processed=%d partial=%d err=%d no_canonical=%d oai_matik=%d oai_empty=%d no_articles=%d no_issn=%d",
+				corpusRes.Target, corpusRes.Skip, corpusRes.Processed, corpusRes.Partial, corpusRes.Err,
+				corpusRes.NoCanonical, corpusRes.OAIMatik, corpusRes.OAIEmpty, corpusRes.NoArticles, corpusRes.NoISSN)
+			log.Printf("[RINGKASAN] corpus  : articles=%d oai_get=%d crossref_get=%d embargo=%d vol_miss=%d vol_fall=%d",
+				corpusRes.ArticlesWritten, corpusRes.OAIGet, corpusRes.CrossrefGET, corpusRes.EmbargoFound,
+				corpusRes.FlagVolMiss, corpusRes.FlagVolFall)
+			log.Printf("[RINGKASAN] corpus  : verifikasi %s", corpusRes.VerifyMsg)
+		}
+		// ── Pass 2 otomatis (doc 43 §5.3: jalan bila pass 1 tuntas — 0 GET) ──
+		if corpusErr == nil {
+			tfStart := time.Now()
+			tfidfRes, tfErr := corpus.RunTFIDF(store, corpus.DefaultKeywordsDir, log.Printf)
+			log.Printf("stage corpus pass2 durasi: %.1fs", time.Since(tfStart).Seconds())
+			switch {
+			case tfErr != nil:
+				log.Printf("stage corpus pass2 GAGAL: %v", tfErr)
+				if stageErr == nil {
+					stageErr = tfErr
+				}
+			case !tfidfRes.Verified:
+				log.Printf("stage corpus pass2 BELUM LENGKAP: %s", tfidfRes.VerifyMsg)
+				if stageErr == nil {
+					stageErr = fmt.Errorf("stage corpus pass2 belum lengkap: %s", tfidfRes.VerifyMsg)
+				}
+			}
+			if tfidfRes != nil {
+				log.Printf("[RINGKASAN] tfidf   : docs=%d kandidat=%d tagged=%d no_signal=%d snapshot=v%d reused=%v",
+					tfidfRes.Docs, tfidfRes.Candidates, tfidfRes.Tagged, tfidfRes.NoSignal,
+					tfidfRes.SnapshotVersion, tfidfRes.SnapshotReused)
+			}
+		}
+	} else {
+		log.Println("stage corpus tidak diminta (-stages), dilewati")
+	}
 	if stagesInclude(*stages, "pdf") {
 		log.Println("[info] stage pdf belum diimplementasi (Fase D) — dilewati pada build ini")
 	}
@@ -345,6 +474,7 @@ func main() {
 			"rank":              *rank,
 			"year":              *year,
 			"latest-vol":        *latestVol,
+			"vol-n":             *volN,
 			"workers":           *workers,
 			"min-delay":         minDelay.String(),
 			"max-delay":         maxDelay.String(),
@@ -483,12 +613,12 @@ func validStages(v string) error {
 	if v == "all" {
 		return nil
 	}
-	valid := map[string]bool{"sinta": true, "garuda": true, "ojs": true, "pdf": true}
+	valid := map[string]bool{"sinta": true, "garuda": true, "ojs": true, "volume": true, "corpus": true, "pdf": true}
 	seen := map[string]bool{}
 	for _, tok := range strings.Split(v, ",") {
 		tok = strings.TrimSpace(tok)
 		if !valid[tok] {
-			return fmt.Errorf("-stages tidak valid: %q (pakai sinta,garuda,ojs,pdf | all)", tok)
+			return fmt.Errorf("-stages tidak valid: %q (pakai sinta,garuda,ojs,volume,corpus,pdf | all)", tok)
 		}
 		if seen[tok] {
 			return fmt.Errorf("-stages stage %q duplikat", tok)
@@ -542,6 +672,48 @@ func validLatestVol(v string) error {
 		return nil
 	}
 	return fmt.Errorf("-latest-vol tidak valid: %q (pakai angka >= 1 | all)", v)
+}
+
+// validVolN memvalidasi -vol-n (scope stage corpus — doc 43 §5.1).
+func validVolN(n int) error {
+	if n < 1 {
+		return fmt.Errorf("-vol-n harus >= 1 (dapat %d) — 1 = volume terakhir", n)
+	}
+	return nil
+}
+
+// validOAIMaxPages memvalidasi -oai-max-pages (cap resumption OAI — O-C4).
+func validOAIMaxPages(n int) error {
+	if n < 1 {
+		return fmt.Errorf("-oai-max-pages harus >= 1 (dapat %d) — safety cap halaman OAI", n)
+	}
+	return nil
+}
+
+// parseJournalIDs memvalidasi -journal (scope corpus — doc 43 §5.7, C6):
+// "673,689" → []int64 · "" = tanpa scope (semua). Angka valid ≥ 1; typo
+// ditangkap di sini (bukan sunyi) + di stage (ID tak ada = error).
+func parseJournalIDs(v string) ([]int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil, nil
+	}
+	var ids []int64
+	for _, tok := range strings.Split(v, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(tok, 10, 64)
+		if err != nil || n < 1 {
+			return nil, fmt.Errorf("-journal tidak valid: %q (pakai daftar ID koma, mis. 673,689)", tok)
+		}
+		ids = append(ids, n)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("-journal kosong setelah parsing (pakai daftar ID koma, mis. 673,689)")
+	}
+	return ids, nil
 }
 
 func stagesInclude(stages, want string) bool {
