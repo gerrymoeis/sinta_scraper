@@ -265,3 +265,50 @@ func TestAllArticles(t *testing.T) {
 		}
 	}
 }
+
+// TestCorpusTargetsFallbackOJSURL — G17b (28 Okt): Canonical fallback ke
+// journals.ojs_url bila source_profile kosong (kasus j688 IJEEI/j696 IJASEIT
+// — enrichment garuda tanpa baris profile, tapi stage sinta MENYIMPAN
+// ojs_url). Profil menang bila ada (NULLIF kedua lapis → kebal string ”).
+func TestCorpusTargetsFallbackOJSURL(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "tgt.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	// j10 TANPA profile + ojs_url terisi → fallback aktif.
+	// j11 profile ADA + ojs_url juga ada → profil menang.
+	// j12 profile ada tapi canonical='' (string kosong, bukan NULL) → ojs_url menang.
+	if _, err := st.UpsertJournals([]sinta.Journal{
+		{ID: 10, Name: "Tanpa Profil", SintaRank: 1, SourcePage: 1, OJSURL: "https://ojs.tanpaprofil.test/index.php/tp"},
+		{ID: 11, Name: "Profil Menang", SintaRank: 1, SourcePage: 1, OJSURL: "https://ojs.lama.test/x"},
+		{ID: 12, Name: "Profil Kosong", SintaRank: 1, SourcePage: 1, OJSURL: "https://ojs.profilkosong.test/index.php/pk"},
+	}); err != nil {
+		t.Fatalf("UpsertJournals: %v", err)
+	}
+	for _, p := range []SourceProfile{
+		{JournalID: 11, Platform: "ojs", Evidence: "marker", CanonicalURL: "https://baru.test/ny"},
+		{JournalID: 12, Platform: "ojs", Evidence: "marker", CanonicalURL: ""},
+	} {
+		if err := st.UpsertSourceProfile(p); err != nil {
+			t.Fatalf("UpsertSourceProfile j%d: %v", p.JournalID, err)
+		}
+	}
+	tgts, err := st.CorpusTargets([]int{1})
+	if err != nil {
+		t.Fatalf("CorpusTargets: %v", err)
+	}
+	want := map[int64]string{
+		10: "https://ojs.tanpaprofil.test/index.php/tp",
+		11: "https://baru.test/ny",
+		12: "https://ojs.profilkosong.test/index.php/pk",
+	}
+	if len(tgts) != 3 {
+		t.Fatalf("target = %d — mau 3", len(tgts))
+	}
+	for _, tg := range tgts {
+		if tg.Canonical != want[tg.ID] {
+			t.Errorf("j%d Canonical = %q — mau %q", tg.ID, tg.Canonical, want[tg.ID])
+		}
+	}
+}

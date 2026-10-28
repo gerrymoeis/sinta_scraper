@@ -272,7 +272,7 @@ type CorpusTarget struct {
 	Name      string
 	ISSN      string // print_issn (utama Crossref)
 	EISSN     string // fallback bila print kosong
-	Canonical string // source_profile.canonical_url — fallback OAI (+"/oai")
+	Canonical string // source_profile.canonical_url — fallback OAI (+"/oai"); G17b: kosong → COALESCE ke journals.ojs_url (URL resmi dari stage sinta)
 	OAIResmi  string // journal_enrichment.garuda_oai_url — URL OAI RESMI Garuda (prioritas E5; 252 terisi; "" = fallback canonical)
 	Complete  bool   // resume: ada baris articles is_complete=1
 }
@@ -283,7 +283,7 @@ func (s *Store) CorpusTargets(ranks []int) ([]CorpusTarget, error) {
 	where, args := rankWhere(ranks)
 	rows, err := s.db.Query(`
 		SELECT j.id, j.name, COALESCE(j.print_issn, ''), COALESCE(j.electronic_issn, ''),
-		       COALESCE(sp.canonical_url, ''),
+		       COALESCE(NULLIF(sp.canonical_url, ''), NULLIF(j.ojs_url, ''), ''),
 		       COALESCE(e.garuda_oai_url, ''),
 		       CASE WHEN EXISTS (SELECT 1 FROM articles a
 		                         WHERE a.journal_id = j.id AND a.is_complete = 1)

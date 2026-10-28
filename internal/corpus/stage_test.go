@@ -474,3 +474,141 @@ func TestStageCorpusPrioritasOAIResmi(t *testing.T) {
 	}
 	// NoCanonical hanya bila KEDUANYA kosong — tercakup test KategoriJujur (j2 tanpa profile).
 }
+
+const oaiJ6TanpaVol = `<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <ListRecords>
+    <record>
+      <header><identifier>oai:j6.test:1</identifier></header>
+      <metadata><oai_dc:dc xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>Tanpa Vol Satu</dc:title>
+        <dc:description>Abstrak record tanpa volume dan tanpa tahun rilis.</dc:description>
+        <dc:identifier>https://j6.test/index.php/j6/article/view/1</dc:identifier>
+      </oai_dc:dc></metadata>
+    </record>
+    <record>
+      <header><identifier>oai:j6.test:2</identifier></header>
+      <metadata><oai_dc:dc xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>Tanpa Vol Dua</dc:title>
+        <dc:description>Abstrak record kedua tanpa volume dan tanpa tahun rilis.</dc:description>
+        <dc:identifier>https://j6.test/index.php/j6/article/view/2</dc:identifier>
+      </oai_dc:dc></metadata>
+    </record>
+  </ListRecords>
+</OAI-PMH>`
+
+// crossrefG17b = 3 artikel vol-5 (2026, lengkap: judul+URL+DOI) + 1 vol-4
+// lawas — scope vol-1 harus memilih vol-5 (3 baris tulis; vol-4 dibuang).
+const crossrefG17b = `{"status":"ok","message":{"total-results":4,"items":[
+	{"DOI":"10.9/g1","title":["Artikel G17b Satu"],"issued":{"date-parts":[[2026,3,1]]},
+	 "volume":"5","issue":"1","URL":"https://j5.test/index.php/j5/article/view/1",
+	 "container-title":["Jurnal Gizi"],
+	 "license":[{"URL":"https://creativecommons.org/licenses/by/4.0/","start":{"date-time":"2020-01-01T00:00:00Z"}}]},
+	{"DOI":"10.9/g2","title":["Artikel G17b Dua"],"issued":{"date-parts":[[2026,3,2]]},
+	 "volume":"5","issue":"1","URL":"https://j5.test/index.php/j5/article/view/2",
+	 "container-title":["Jurnal Gizi"]},
+	{"DOI":"10.9/g3","title":["Artikel G17b Tiga"],"issued":{"date-parts":[[2026,3,3]]},
+	 "volume":"5","issue":"2","URL":"https://j5.test/index.php/j5/article/view/3",
+	 "container-title":["Jurnal Gizi"]},
+	{"DOI":"10.9/g0","title":["Artikel Lawas"],"issued":{"date-parts":[[2025,1,1]]},
+	 "volume":"4","issue":"1","URL":"https://j5.test/index.php/j5/article/view/0",
+	 "container-title":["Jurnal Gizi"]}
+]}}`
+
+// TestStageCorpusG17b — 28 Okt: 3 fix penyelamat sisa jurnal.
+// Kasus A (j5, pola j688 IJEEI): TANPA kanonik + TANPA link resmi TAPI ISSN
+// ada → OAI dilewati sengaja (0 GET), API-merge Crossref by ISSN jadi primer.
+// Kasus B (j6, pola j9155 Ulumuna): OAI hidup tapi SEMUA record tanpa vol
+// DAN tanpa tahun (vol_unparsed) → fallback API-merge sekali sebelum nyerah.
+func TestStageCorpusG17b(t *testing.T) {
+	st, err := storage.Open(filepath.Join(t.TempDir(), "g17b.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	js := []sinta.Journal{
+		// Kasus A: TANPA profile/oai_resmi/ojs_url → Canonical "" — ISSN print ada.
+		{ID: 5, Name: "Jurnal Gizi", SintaRank: 1, SourcePage: 1, PrintISSN: "2087-5886"},
+		// Kasus B: profile canonical ada (OAI dipakai) — ISSN utk fallback API.
+		{ID: 6, Name: "Jurnal Gizi", SintaRank: 1, SourcePage: 1, PrintISSN: "1111-2222"},
+	}
+	if _, err := st.UpsertJournals(js); err != nil {
+		t.Fatalf("UpsertJournals: %v", err)
+	}
+	if err := st.UpsertSourceProfile(storage.SourceProfile{JournalID: 6, Platform: "ojs",
+		Evidence: "marker", CanonicalURL: "https://j6.test/index.php/j6"}); err != nil {
+		t.Fatalf("UpsertSourceProfile j6: %v", err)
+	}
+
+	const qList = "?verb=ListRecords&metadataPrefix=oai_dc" // pola fetchListRecords
+	const (
+		oaiJ6 = "https://j6.test/index.php/j6/oai" + qList
+		crJ5  = "https://api.crossref.org/journals/20875886/works?rows=1000&sort=published&order=desc&select=DOI,title,abstract,issued,volume,issue,URL,container-title,subject,license,publisher,page"
+		crJ6  = "https://api.crossref.org/journals/11112222/works?rows=1000&sort=published&order=desc&select=DOI,title,abstract,issued,volume,issue,URL,container-title,subject,license,publisher,page"
+	)
+	m := &mockGetter{}
+	m.set(crJ5, crossrefG17b, 200)
+	m.set(oaiJ6, oaiJ6TanpaVol, 200)
+	m.set(crJ6, crossrefG17b, 200)
+
+	rep, err := RunCorpusStage(st, corpusCfg(m))
+	if err != nil {
+		t.Fatalf("RunCorpusStage: %v", err)
+	}
+
+	// Kasus A: Crossref by ISSN 1 GET; URL OAI j5 TIDAK PERNAH disentuh.
+	if m.hits[crJ5] != 1 {
+		t.Errorf("crossref j5 hits = %d — mau 1 (API-merge by ISSN, G17b)", m.hits[crJ5])
+	}
+	for u := range m.hits {
+		if strings.HasPrefix(u, "https://j5.test/") {
+			t.Errorf("j5 tanpa kanonik tapi kena GET OAI liar %q — mau 0 GET (lompat OAI, G17b)", u)
+		}
+	}
+
+	// Kasus B: OAI 1 GET (vol_unparsed) → fallback Crossref 1 GET.
+	if m.hits[oaiJ6] != 1 || m.hits[crJ6] != 1 {
+		t.Errorf("hits oai/crossref j6 = %d/%d — mau 1/1 (OAI vol_unparsed → fallback API); rep=%+v hits=%v",
+			m.hits[oaiJ6], m.hits[crJ6], rep, m.hits)
+	}
+
+	// Report: 2 jurnal proses penuh — 0 NoCanonical/NoArticles/OAIMatik.
+	if rep.Target != 2 || rep.Processed != 2 || rep.NoCanonical != 0 ||
+		rep.NoArticles != 0 || rep.OAIMatik != 0 || rep.OAIEmpty != 0 {
+		t.Errorf("target/processed/nocanon/noArticles/oaiMatik/oaiEmpty = %d/%d/%d/%d/%d/%d — mau 2/2/0/0/0/0; rep=%+v",
+			rep.Target, rep.Processed, rep.NoCanonical, rep.NoArticles, rep.OAIMatik, rep.OAIEmpty, rep)
+	}
+	if rep.OAIGet != 1 || rep.CrossrefGET != 2 || rep.APIFallback != 1 {
+		t.Errorf("oai/crossref/apiFallback GET = %d/%d/%d — mau 1/2/1; rep=%+v",
+			rep.OAIGet, rep.CrossrefGET, rep.APIFallback, rep)
+	}
+	if rep.Partial != 0 {
+		t.Errorf("Partial = %d — mau 0 (fixture lengkap, derive semua sukses)", rep.Partial)
+	}
+	if !rep.Verified {
+		t.Errorf("Verified=false (VerifyMsg=%q) — mau true (kedua jurnal berisi)", rep.VerifyMsg)
+	}
+
+	// Kedua jurnal: 3 baris vol-5 dari crossref (vol-4 lawas dibuang scope vol-1).
+	for _, jid := range []int64{5, 6} {
+		rows, aerr := st.Articles(jid)
+		if aerr != nil {
+			t.Fatalf("Articles j%d: %v", jid, aerr)
+		}
+		if len(rows) != 3 {
+			t.Errorf("j%d baris = %d — mau 3 (vol-5 dari API-merge)", jid, len(rows))
+			continue
+		}
+		for _, r := range rows {
+			if r.Source != storage.ArticleSourceCrossref {
+				t.Errorf("j%d source = %q — mau crossref", jid, r.Source)
+			}
+			if r.VolumeNo != 5 {
+				t.Errorf("j%d vol = %d — mau 5 (scope vol terakhir)", jid, r.VolumeNo)
+			}
+			if !r.IsComplete {
+				t.Errorf("j%d record %s incomplete — mau complete", jid, r.RecordID)
+			}
+		}
+	}
+}

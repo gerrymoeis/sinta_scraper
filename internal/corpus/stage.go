@@ -25,6 +25,11 @@ import (
 // kategori OAIEmpty (jujur, bukan OAI-matik).
 var errOAINoRecords = errors.New("oai: noRecordsMatch (0 record untuk scope)")
 
+// errNoOAIURL = G17b (28 Okt): jurnal TANPA kanonik & TANPA link OAI resmi
+// TAPI punya ISSN → OAI dilewati sengaja, rantai API-merge (Crossref/DOAJ
+// by ISSN) langsung jalan. Kasus nyata j688 IJEEI (situs custom tanpa OAI).
+var errNoOAIURL = errors.New("oai: tanpa URL — lompat ke API-merge by ISSN (G17b)")
+
 // PlainGetter = kontrak GET tunggal tanpa retry (dipenuhi garuda.Client
 // GetPlain — main.go menyuntik client; pola volume.StageConfig).
 type PlainGetter interface {
@@ -174,22 +179,36 @@ func processCorpusJournal(store *storage.Store, cfg StageConfig, rep *StageRepor
 
 	// ── Basis OAI (prioritas E5 — TEMUAN G1 fix, doc 34 §4): link RESMI
 	// garuda_oai_url (252 terisi — 113/252 beda dari canonical+/oai) dulu;
-	// fallback pola lama canonical+"/oai" (C3). Keduanya kosong = NoCanonical
-	// jujur (0 GET) — jurnal WAF dgn link resmi tetap diproses.
+	// fallback pola lama canonical+"/oai" (C3). Keduanya kosong G17b: bila
+	// ISSN ada → OAI dilewati sengaja, API-merge by ISSN tetap jalan
+	// (j688 IJEEI — situs custom tanpa OAI/OJS); tanpa ISSN juga =
+	// NoCanonical jujur (0 GET).
 	oaiBase := strings.TrimRight(t.OAIResmi, "/")
+	oaiSkip := false
 	if oaiBase == "" {
 		if t.Canonical == "" {
-			rep.NoCanonical++
-			logf("[corpus] j%d %q: TANPA KANONIK & TANPA LINK RESMI (jujur — 0 GET)", t.ID, t.Name)
-			return nil
+			if firstNonEmpty(t.ISSN, t.EISSN) == "" {
+				rep.NoCanonical++
+				logf("[corpus] j%d %q: TANPA KANONIK & TANPA LINK RESMI & TANPA ISSN (jujur — 0 GET)", t.ID, t.Name)
+				return nil
+			}
+			oaiSkip = true
+			logf("[corpus] j%d %q: TANPA KANONIK & TANPA LINK RESMI — lompat OAI, API-merge by ISSN (G17b)", t.ID, t.Name)
+		} else {
+			oaiBase = strings.TrimRight(t.Canonical, "/") + "/oai"
 		}
-		oaiBase = strings.TrimRight(t.Canonical, "/") + "/oai"
 	}
 
 	// ── OAI ListRecords (primer, E5) — loop resumption ──
 	works := CrossrefWorks{Items: map[string]CrossrefItem{}}
 	origin := storage.ArticleSourceOAI // asal artikel: oai | crossref | doaj
-	recs, oaiErr := fetchListRecords(cfg, rep, oaiBase)
+	var recs []OAIRecord
+	var oaiErr error
+	if oaiSkip {
+		oaiErr = errNoOAIURL // langsung masuk rantai API-merge di bawah
+	} else {
+		recs, oaiErr = fetchListRecords(cfg, rep, oaiBase)
+	}
 	if oaiErr != nil {
 		if errors.Is(oaiErr, errOAINoRecords) {
 			rep.OAIEmpty++
@@ -210,7 +229,8 @@ func processCorpusJournal(store *storage.Store, cfg StageConfig, rep *StageRepor
 				// anti-WAF (tls-client → BrowserSolve) — OAI ASLI kembali
 				// jadi primer (provenance oai penuh). noRecordsMatch =
 				// jurnal kosong (OAIEmpty), bukan mati.
-				if cfg.Solver != nil {
+				// oaiSkip (G17b): tanpa URL OAI → solver tak punya target ulang.
+				if cfg.Solver != nil && oaiBase != "" {
 					cfgS := cfg
 					cfgS.SolverMode = true // 403/468 → Solver.Get di getRetry
 					recsS, serr := fetchListRecords(cfgS, rep, oaiBase)
@@ -264,6 +284,26 @@ func processCorpusJournal(store *storage.Store, cfg StageConfig, rep *StageRepor
 	f := FilterLatestVolume(recs, volN)
 	if f.Flag == "vol_fallback" {
 		rep.FlagVolFall++
+	}
+	if len(f.Picked) == 0 && f.Flag == "vol_unparsed" && origin == storage.ArticleSourceOAI {
+		// G17b (j9155 Ulumuna): OAI hidup tapi SEMUA record tanpa vol DAN
+		// tanpa tahun → metadata OAI terlalu miskin utk scope; Crossref/
+		// DOAJ biasanya bawa vol+issued → coba API-merge sekali sebelum
+		// nyerah (jujur). Guard identitas tetap diterapkan (pola C3b).
+		if apiRecs, apiWorks, apiSrc, ferr := fetchAPIFallback(cfg, rep, t, now); ferr == nil {
+			if own, dropped := FilterOwnRecords(apiRecs, t.Name); dropped > 0 {
+				logf("[corpus] j%d %q: guard identitas (jalur API vol_unparsed) — %d record asing dibuang, %d tersisa",
+					t.ID, t.Name, dropped, len(own))
+				apiRecs = own
+			}
+			logf("[corpus] j%d %q: vol_unparsed dari OAI → API-merge %s: %d record (G17b)",
+				t.ID, t.Name, apiSrc, len(apiRecs))
+			recs, works, origin = apiRecs, apiWorks, apiSrc
+			f = FilterLatestVolume(recs, volN)
+			if f.Flag == "vol_fallback" {
+				rep.FlagVolFall++
+			}
+		}
 	}
 	if len(f.Picked) == 0 {
 		rep.NoArticles++
