@@ -300,6 +300,51 @@ func main() {
 		log.Println("stage ojs tidak diminta (-stages), dilewati")
 	}
 
+	// ── Stage garuda (Q4 §9.1: wiring logika internal/garuda — doc 40) ─
+	// P0 (28 Okt, doc 44 §5): blok INI dipindah dari posisi paling akhir ke
+	// sini supaya urutan `all` = sinta → ojs → garuda → corpus → volume →
+	// pdf — corpus SELALU mendapat enrichment `garuda_oai_url` (prioritas
+	// E5) + `volume` mendapat `source_profile` pada run pertama DB baru.
+	if stagesInclude(*stages, "garuda") {
+		ranks, err := sinta.ParseRankSet(*rank)
+		if err != nil {
+			log.Fatalf("GAGAL: %v", err)
+		}
+		if ranks == nil {
+			log.Printf("stage garuda: scope rank=all | refresh=%v | fixtures=%s",
+				*refresh, filepath.Join(filepath.Dir(*logPath), "garuda"))
+		} else {
+			log.Printf("stage garuda: scope rank=%v | refresh=%v | fixtures=%s",
+				ranks, *refresh, filepath.Join(filepath.Dir(*logPath), "garuda"))
+		}
+		gStart := time.Now()
+		garudaRes, err = garuda.RunGarudaStage(store, garuda.StageConfig{
+			Ranks:       ranks,
+			Refresh:     *refresh,
+			UserAgent:   *userAgent,
+			MinDelay:    *minDelay,
+			MaxDelay:    *maxDelay,
+			FixturesDir: filepath.Join(filepath.Dir(*logPath), "garuda"),
+			Logf:        log.Printf,
+		})
+		log.Printf("stage garuda durasi: %.1fs", time.Since(gStart).Seconds())
+		switch {
+		case err != nil:
+			log.Printf("stage garuda GAGAL: %v", err)
+			if stageErr == nil {
+				stageErr = err
+			}
+		case !garudaRes.Verified:
+			log.Printf("stage garuda BELUM LENGKAP: %s", garudaRes.VerifyMsg)
+			log.Printf("jalankan ulang command yang sama — resume mengulang hanya sub-fase yang gagal")
+			if stageErr == nil {
+				stageErr = fmt.Errorf("stage garuda belum lengkap: %s", garudaRes.VerifyMsg)
+			}
+		}
+	} else {
+		log.Println("stage garuda tidak diminta (-stages), dilewati")
+	}
+
 	// ── Stage volume (doc 41 §13.7 K6 REVISED — driver Tahap 3) ─
 	if stagesInclude(*stages, "volume") {
 		ranks, err := sinta.ParseRankSet(*rank)
@@ -420,47 +465,6 @@ func main() {
 	}
 	if stagesInclude(*stages, "pdf") {
 		log.Println("[info] stage pdf belum diimplementasi (Fase D) — dilewati pada build ini")
-	}
-
-	// ── Stage garuda (Q4 §9.1: wiring logika internal/garuda — doc 40) ─
-	if stagesInclude(*stages, "garuda") {
-		ranks, err := sinta.ParseRankSet(*rank)
-		if err != nil {
-			log.Fatalf("GAGAL: %v", err)
-		}
-		if ranks == nil {
-			log.Printf("stage garuda: scope rank=all | refresh=%v | fixtures=%s",
-				*refresh, filepath.Join(filepath.Dir(*logPath), "garuda"))
-		} else {
-			log.Printf("stage garuda: scope rank=%v | refresh=%v | fixtures=%s",
-				ranks, *refresh, filepath.Join(filepath.Dir(*logPath), "garuda"))
-		}
-		gStart := time.Now()
-		garudaRes, err = garuda.RunGarudaStage(store, garuda.StageConfig{
-			Ranks:       ranks,
-			Refresh:     *refresh,
-			UserAgent:   *userAgent,
-			MinDelay:    *minDelay,
-			MaxDelay:    *maxDelay,
-			FixturesDir: filepath.Join(filepath.Dir(*logPath), "garuda"),
-			Logf:        log.Printf,
-		})
-		log.Printf("stage garuda durasi: %.1fs", time.Since(gStart).Seconds())
-		switch {
-		case err != nil:
-			log.Printf("stage garuda GAGAL: %v", err)
-			if stageErr == nil {
-				stageErr = err
-			}
-		case !garudaRes.Verified:
-			log.Printf("stage garuda BELUM LENGKAP: %s", garudaRes.VerifyMsg)
-			log.Printf("jalankan ulang command yang sama — resume mengulang hanya sub-fase yang gagal")
-			if stageErr == nil {
-				stageErr = fmt.Errorf("stage garuda belum lengkap: %s", garudaRes.VerifyMsg)
-			}
-		}
-	} else {
-		log.Println("stage garuda tidak diminta (-stages), dilewati")
 	}
 
 	log.Print(metrics.Default.Report())
