@@ -14,4 +14,11 @@ const (
 	LanguageEN       = storage.LanguageEN
 	LanguageMixed    = storage.LanguageMixed
 	LanguageUnknown  = storage.LanguageUnknown
+	// C7 B-additive (doc 43 §6.x.8 D1): atribut akses + lisensi terpisah.
+	OAFree             = storage.OAFree
+	OAPaid             = storage.OAPaid
+	OARestricted       = storage.OARestricted
+	OAUnknown          = storage.OAUnknown
+	LicenseTypeARR     = storage.LicenseTypeARR
+	LicenseTypeUnknown = storage.LicenseTypeUnknown
 )

@@ -24,6 +24,7 @@ func fullArticleRow(jid int64) ArticleRow {
 		Language:      LanguageMixed,
 		KeywordsJSON:  `[{"kw":"stunting","src":"author","lang":"id"}]`,
 		LicenseStatus: LicenseOpen, LicenseURL: "https://creativecommons.org/licenses/by/4.0/",
+		OAStatus: OAFree, LicenseType: "CC BY 4.0", // C7: atribut terpisah
 		Source: ArticleSourceOAI, IsComplete: true,
 		Provenance: `{"oai":"ok"}`,
 	}
@@ -56,6 +57,9 @@ func TestUpsertArticle(t *testing.T) {
 		a.LicenseStatus != LicenseOpen || !a.IsComplete {
 		t.Errorf("isi baris = %+v — mau ter-update penuh", a)
 	}
+	if a.OAStatus != OAFree || a.LicenseType != "CC BY 4.0" {
+		t.Errorf("atribut C7 = %q/%q — mau free/CC BY 4.0 (roundtrip)", a.OAStatus, a.LicenseType)
+	}
 	if a.VolumeNo != 12 || a.Year != 2025 || a.DOI != "10.1234/abc" {
 		t.Errorf("vol/year/doi = %d/%d/%q — mau 12/2025/10.1234/abc", a.VolumeNo, a.Year, a.DOI)
 	}
@@ -78,6 +82,22 @@ func TestUpsertArticle(t *testing.T) {
 	bad.KeywordsJSON = "bukan-json"
 	if err := st.UpsertArticle(bad); err == nil {
 		t.Error("keywords bukan JSON harusnya DITOLAK")
+	}
+	// Guard C7: oa_status & license_type di luar whitelist DITOLAK (D1);
+	// atribut kosong "" → default jujur "unknown" (pemanggil lama).
+	bad.KeywordsJSON = "[]"
+	bad.OAStatus = "gratis"
+	if err := st.UpsertArticle(bad); err == nil {
+		t.Error("oa_status 'gratis' harusnya DITOLAK (whitelist free|paid|restricted|unknown)")
+	}
+	bad.OAStatus = OARestricted
+	bad.LicenseType = "CC BY-XYZ"
+	if err := st.UpsertArticle(bad); err == nil {
+		t.Error("license_type 'CC BY-XYZ' harusnya DITOLAK (whitelist CC-kanonik|ARR|unknown)")
+	}
+	bad.OAStatus, bad.LicenseType = "", ""
+	if err := st.UpsertArticle(bad); err != nil {
+		t.Errorf("atribut kosong harus default unknown: %v", err)
 	}
 	// Source whitelist (C3b opsi A — approve 27 Okt): oai|crossref|doaj|
 	// landing sah; nilai di luar whitelist tetap ditolak.
@@ -137,6 +157,78 @@ func TestUpdateArticleKeywords(t *testing.T) {
 	}
 	if err := st.UpdateArticleKeywords(5, "oai:jurnalku:123", "rusak", "{}"); err == nil {
 		t.Error("keywords rusak harusnya DITOLAK")
+	}
+}
+
+// TestMigrasiKolomAtributC7 — db "lama" (sebelum C7, tanpa 2 kolom atribut)
+// → Open menambahkannya lewat ALTER dgn DEFAULT 'unknown' (jujur utk baris
+// lama), Open ulang idempoten (doc 43 §6.x.8 tahap D1).
+func TestMigrasiKolomAtributC7(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c7attr.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	kolomAda := func(st *Store) (oa, lt bool) {
+		t.Helper()
+		for _, c := range []struct {
+			nama string
+			*bool
+		}{
+			{"oa_status", &oa},
+			{"license_type", &lt},
+		} {
+			var n int
+			if err := st.db.QueryRow(
+				`SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name = ?`,
+				c.nama,
+			).Scan(&n); err != nil {
+				t.Fatalf("cek kolom %s: %v", c.nama, err)
+			}
+			*c.bool = n > 0
+		}
+		return oa, lt
+	}
+	if oa, lt := kolomAda(st); !oa || !lt {
+		t.Fatalf("db baru harus sudah punya kolom C7: oa=%v lt=%v", oa, lt)
+	}
+	// baris lama → simulasi db pra-C7: jatuhkan kedua kolom
+	seedArticleJournal(t, st, 1)
+	if err := st.UpsertArticle(fullArticleRow(1)); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	for _, col := range []string{"oa_status", "license_type"} {
+		if _, err := st.db.Exec(`ALTER TABLE articles DROP COLUMN ` + col); err != nil {
+			t.Fatalf("drop %s: %v", col, err)
+		}
+	}
+	if oa, lt := kolomAda(st); oa || lt {
+		t.Fatal("drop kolom gagal")
+	}
+	st.Close()
+
+	// Open kedua (migrasi): kolom kembali + baris lama default 'unknown'
+	st2, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open kedua (migrasi C7): %v", err)
+	}
+	defer st2.Close()
+	if oa, lt := kolomAda(st2); !oa || !lt {
+		t.Fatalf("ALTER C7 tidak menambah kolom: oa=%v lt=%v", oa, lt)
+	}
+	got, err := st2.Articles(1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Articles = %d err=%v — mau 1", len(got), err)
+	}
+	if got[0].OAStatus != OAUnknown || got[0].LicenseType != LicenseTypeUnknown {
+		t.Errorf("baris pra-C7 = %q/%q — mau default unknown/unknown", got[0].OAStatus, got[0].LicenseType)
+	}
+	// rerun Open = idempoten (tanpa error, kolom tetap)
+	st2.Close()
+	if st3, err := Open(path); err != nil {
+		t.Fatalf("Open ketiga (idempoten): %v", err)
+	} else {
+		st3.Close()
 	}
 }
 

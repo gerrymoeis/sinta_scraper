@@ -319,6 +319,27 @@ func TestStageCorpusHappyPath(t *testing.T) {
 	if r.LicenseStatus != LicenseOpen || r.Language != LanguageEN || r.AbstractEN == "" {
 		t.Errorf("r124 = lang%q lic%q en=%q — mau en + open crossref", r.Language, r.LicenseStatus, r.AbstractEN)
 	}
+	// ── C7 D1 (§6.x.8): 2 atribut TERPISAH dari 4 kelas legacy ──
+	// r125: embargo (start 2027) → oa=restricted; URL license non-CC + rights
+	// tanpa pernyataan CC/ARR → license_type=unknown (jujur, bukan ARR).
+	r = byID["oai:j1.test:125"]
+	if r.OAStatus != OARestricted || r.LicenseType != LicenseTypeUnknown {
+		t.Errorf("r125 atribut = %q/%q — mau restricted/unknown", r.OAStatus, r.LicenseType)
+	}
+	// r123: URL CC via OAI → license_type=CC BY 4.0; CC-saja BUKAN bukti
+	// akses gratis (hybrid) → oa=unknown.
+	r = byID["oai:j1.test:123"]
+	if r.LicenseType != "CC BY 4.0" || r.OAStatus != OAUnknown {
+		t.Errorf("r123 atribut = %q/%q — mau CC BY 4.0/unknown", r.LicenseType, r.OAStatus)
+	}
+	// r124: crossref license aktif (CC) tanpa sinyal akses → oa=unknown.
+	r = byID["oai:j1.test:124"]
+	if r.LicenseType != "CC BY 4.0" || r.OAStatus != OAUnknown {
+		t.Errorf("r124 atribut = %q/%q — mau CC BY 4.0/unknown", r.LicenseType, r.OAStatus)
+	}
+	if !strings.Contains(r.Provenance, `"oa_src"`) {
+		t.Errorf("r124 provenance = %s — mau jejak oa_src (doc 43 §6.x.8 D1)", r.Provenance)
+	}
 
 	// ── Resume: j1 complete → Skip; j4 tanpa baris → re-GET (jujur) ──
 	j4Hits := m.hits[oaiJ4]

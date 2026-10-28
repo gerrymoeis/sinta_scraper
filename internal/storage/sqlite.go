@@ -170,8 +170,14 @@ CREATE TABLE IF NOT EXISTS articles (
 	abstract_en    TEXT,                       -- abstrak English (NULL bila tak ada)
 	language       TEXT    NOT NULL,           -- id|en|mixed|unknown
 	keywords_json  TEXT,                       -- [{"kw","src":"author|crossref|tfidf","lang"}]
-	license_status TEXT    NOT NULL,           -- open|free_not_open|paid|unknown
+	license_status TEXT    NOT NULL,           -- open|free_not_open|paid|unknown (LEGACY/arsip — definisi dibekukan §6.x.7)
 	license_url    TEXT,                       -- URL CC / hak cipta (audit)
+	-- C7 B-additive (doc 43 §6.x.7-8 — approve user 27 Okt 2026): 2 atribut
+	-- TERPISAH dari 4 kelas legacy. oa_status = dimensi AKSES; license_type =
+	-- dimensi LISENSI (pernyataan yg benar2 ditemukan; default 'unknown' jujur,
+	-- ARR hanya bila tertulis eksplisit). Kolom lama tetap utuh sbg arsip.
+	oa_status      TEXT NOT NULL DEFAULT 'unknown', -- free|paid|restricted|unknown
+	license_type   TEXT NOT NULL DEFAULT 'unknown', -- "CC BY-SA 4.0"|CC0|all_rights_reserved|unknown
 	source         TEXT    NOT NULL,           -- oai|crossref|doaj|landing (C3b: API sbg primer bila OAI gagal)
 	is_complete    INTEGER NOT NULL DEFAULT 0, -- 1 = artikel terisi penuh utk scope vol
 	provenance     TEXT    NOT NULL DEFAULT '{}',
@@ -283,7 +289,40 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("gagal migrasi kolom Fase 3: %w", err)
 	}
 
+	// C7 B-additive (doc 43 §6.x.8 tahap D1 — approve user 27 Okt): 2 kolom
+	// atribut akses+lisensi ke `articles` — db kerja stage2 dibuat SEBELUM C7 →
+	// ALTER idempoten (DEFAULT 'unknown' = jujur utk 8.872 baris lama);
+	// db baru sudah punya lewat CREATE TABLE.
+	if err := addC7AttrColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("gagal migrasi kolom C7 (oa_status/license_type): %w", err)
+	}
+
 	return &Store{db: db}, nil
+}
+
+// addC7AttrColumns menambah 2 kolom atribut C7 ke `articles` bila belum ada
+// (migrasi ALTER idempoten — pola addF32Columns; doc 43 §6.x.8 D1).
+func addC7AttrColumns(db *sql.DB) error {
+	for _, deklarasi := range []string{
+		"oa_status TEXT NOT NULL DEFAULT 'unknown'",
+		"license_type TEXT NOT NULL DEFAULT 'unknown'",
+	} {
+		kolom := strings.Fields(deklarasi)[0]
+		var n int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('articles') WHERE name = ?`,
+			kolom,
+		).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.Exec(`ALTER TABLE articles ADD COLUMN ` + deklarasi); err != nil {
+				return fmt.Errorf("ALTER articles.%s: %w", kolom, err)
+			}
+		}
+	}
+	return nil
 }
 
 // addF32Columns menambah kolom Fase 3 bila belum ada (migrasi ALTER idempoten

@@ -462,6 +462,27 @@ func deriveArticle(t *storage.CorpusTarget, rec OAIRecord, works CrossrefWorks,
 		}
 	}
 
+	// ==== 2 atribut C7 (doc 43 §6.x.8 D1) — turunan 0-GET dari bukti di atas.
+	// license_type: URL Crossref/OAI → teks rights → (tak ketemu) unknown
+	// jujur. oa_status: bukti per-artikel Crossref (embargo/free-to-read) dulu
+	// → pernyataan OAI → unknown (CC-saja TIDAK dianggap gratis — hybrid).
+	licType := LicenseTypeOf(licURL, rec.Rights...)
+	oa, oaSrc := "", ""
+	if doi != "" && crHit {
+		oa, _ = OACrossref(crItem)
+		if oa != "" {
+			oaSrc = "crossref"
+		}
+	}
+	if oa == "" {
+		if s, ok := OAFromOAI(rec.Rights); ok {
+			oa, oaSrc = s, "oai"
+		}
+	}
+	if oa == "" {
+		oa, oaSrc = OAUnknown, "unknown" // probe D3 — jangan ditebak
+	}
+
 	oaiRef := ""
 	if origin == storage.ArticleSourceOAI {
 		if t.Canonical != "" {
@@ -475,7 +496,8 @@ func deriveArticle(t *storage.CorpusTarget, rec OAIRecord, works CrossrefWorks,
 	}
 	provMap := map[string]any{
 		"oai": oaiRef, "scope_vol": volN, "scope_flag": f.Flag,
-		"license_src": src, "vol_parsed": f.Vol, "year": rec.RecordYear(),
+		"license_src": src, "oa_src": oaSrc,
+		"vol_parsed": f.Vol, "year": rec.RecordYear(),
 		"embargo": provEmbargo, "subjects_oai": len(rec.Subjects),
 	}
 	switch origin {
@@ -495,6 +517,7 @@ func deriveArticle(t *storage.CorpusTarget, rec OAIRecord, works CrossrefWorks,
 		AbstractID: absID, AbstractEN: absEN, Language: lang,
 		KeywordsJSON:  KeywordJSON(rec.Subjects, crItem.Subject, lang),
 		LicenseStatus: status, LicenseURL: licURL,
+		OAStatus: oa, LicenseType: licType,
 		Source:     origin,
 		IsComplete: true,
 		Provenance: string(prov),

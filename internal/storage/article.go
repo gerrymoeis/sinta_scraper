@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 )
 
 // Fungsi stage `corpus` (doc 43 §5 — spec di-approve user 14 Okt):
@@ -32,6 +33,43 @@ const (
 	ArticleSourceLand     = "landing"
 )
 
+// ==== C7 B-additive (doc 43 §6.x.7-8 — approve user 27 Okt 2026) ====
+// 2 atribut TERPISAH (skala #1: 2 dimensi beda = beda kolom):
+//   - oa_status = AKSES pembaca: free (baca gratis) · paid (ada tarif) ·
+//     restricted (ditutup TANPA tarif: login/embargo) · unknown (probe gagal
+//     — JANGAN ditebak; 403-WAF = unknown, bukan restricted).
+//   - license_type = LISENSI yang benar2 TERTULIS: tipe CC kanonik
+//     ("CC BY-SA 4.0" / "CC0") · all_rights_reserved (HANYA bila eksplisit) ·
+//     unknown (Not Stated — absennya bukti ≠ bukti ARR; §6.x.7 putaran 3).
+const (
+	OAFree       = "free"
+	OAPaid       = "paid"
+	OARestricted = "restricted"
+	OAUnknown    = "unknown"
+	// LicenseTypeARR all_rights_reserved — teks eksplisit ("Copyright © … All
+	// Rights Reserved"), bukan asumsi hukum. LicenseTypeUnknown = Not Stated.
+	LicenseTypeARR     = "all_rights_reserved"
+	LicenseTypeUnknown = "unknown"
+)
+
+// reCCTypeLabel = whitelist tipe CC kanonik (murni Go, pola whitelist
+// license_status). Urutan alternatif terpanjang-dulu (RE2 leftmost-first):
+// "CC BY-NC-SA 4.0" jangan terpotong jadi "CC BY-NC". Versi = token angka
+// ("4.0", "3.0", "1.0") — cc0/CC0 punya versi sendiri ("CC0 1.0").
+var reCCTypeLabel = regexp.MustCompile(
+	`^(?:CC BY(?:-(?:NC-ND|NC-SA|NC|ND|SA))?(?: \d+(?:\.\d+)*)?|CC0(?: \d+(?:\.\d+)*)?)$`)
+
+// ValidLicenseType = whitelist license_type (doc 43 §6.x.8 D1): tipe CC
+// kanonik · all_rights_reserved · unknown. Nilai liar DITOLAK sebelum masuk DB.
+func ValidLicenseType(t string) bool {
+	return t == LicenseTypeUnknown || t == LicenseTypeARR || reCCTypeLabel.MatchString(t)
+}
+
+// ValidOAStatus = whitelist oa_status: free|paid|restricted|unknown.
+func ValidOAStatus(s string) bool {
+	return s == OAFree || s == OAPaid || s == OARestricted || s == OAUnknown
+}
+
 // ArticleRow = input tulis 1 baris korpus artikel.
 type ArticleRow struct {
 	JournalID     int64
@@ -46,8 +84,10 @@ type ArticleRow struct {
 	AbstractEN    string // "" = null
 	Language      string // id|en|mixed|unknown
 	KeywordsJSON  string // `[{"kw","src","lang"}]` — "[]" bila kosong
-	LicenseStatus string // open|free_not_open|paid|unknown
+	LicenseStatus string // open|free_not_open|paid|unknown (LEGACY arsip)
 	LicenseURL    string // "" = null
+	OAStatus      string // C7: free|paid|restricted|unknown ("" → "unknown")
+	LicenseType   string // C7: "CC BY-SA 4.0"|CC0|all_rights_reserved|unknown ("" → "unknown")
 	Source        string // oai|crossref|doaj|landing
 	IsComplete    bool
 	Provenance    string // JSON object — "{}" bila kosong
@@ -71,6 +111,22 @@ func (s *Store) UpsertArticle(a ArticleRow) error {
 		return fmt.Errorf("articles: source %q di luar whitelist oai|crossref|doaj|landing (journal %d rec %q)",
 			a.Source, a.JournalID, a.RecordID)
 	}
+	// C7: default jujur "" → unknown (db lama / pemanggil lama tanpa atribut),
+	// lalu whitelist ketat — nilai liar ditolak sebelum menyentuh DB.
+	if a.OAStatus == "" {
+		a.OAStatus = OAUnknown
+	}
+	if !ValidOAStatus(a.OAStatus) {
+		return fmt.Errorf("articles: oa_status %q di luar whitelist free|paid|restricted|unknown (journal %d rec %q)",
+			a.OAStatus, a.JournalID, a.RecordID)
+	}
+	if a.LicenseType == "" {
+		a.LicenseType = LicenseTypeUnknown
+	}
+	if !ValidLicenseType(a.LicenseType) {
+		return fmt.Errorf("articles: license_type %q di luar whitelist CC-kanonik|all_rights_reserved|unknown (journal %d rec %q)",
+			a.LicenseType, a.JournalID, a.RecordID)
+	}
 	if a.KeywordsJSON == "" {
 		a.KeywordsJSON = "[]" // G4-style default valid
 	}
@@ -91,8 +147,9 @@ func (s *Store) UpsertArticle(a ArticleRow) error {
 		INSERT INTO articles
 			(journal_id, record_id, volume_no, issue_no, year, title, doi,
 			 article_url, abstract_id, abstract_en, language, keywords_json,
-			 license_status, license_url, source, is_complete, provenance, retrieved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 license_status, license_url, oa_status, license_type, source,
+			 is_complete, provenance, retrieved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(journal_id, record_id) DO UPDATE SET
 			volume_no = excluded.volume_no,
 			issue_no = excluded.issue_no,
@@ -106,6 +163,8 @@ func (s *Store) UpsertArticle(a ArticleRow) error {
 			keywords_json = excluded.keywords_json,
 			license_status = excluded.license_status,
 			license_url = excluded.license_url,
+			oa_status = excluded.oa_status,
+			license_type = excluded.license_type,
 			source = excluded.source,
 			is_complete = excluded.is_complete,
 			provenance = excluded.provenance,
@@ -114,6 +173,7 @@ func (s *Store) UpsertArticle(a ArticleRow) error {
 		intOrZero(a.Year), a.Title, nilIfEmpty(a.DOI), a.ArticleURL,
 		nilIfEmpty(a.AbstractID), nilIfEmpty(a.AbstractEN), a.Language,
 		a.KeywordsJSON, a.LicenseStatus, nilIfEmpty(a.LicenseURL),
+		a.OAStatus, a.LicenseType,
 		a.Source, complete, a.Provenance, nowUTC(),
 	)
 	if err != nil {
@@ -137,7 +197,8 @@ func (s *Store) Articles(journalID int64) ([]ArticleRow, error) {
 		SELECT journal_id, record_id, volume_no, issue_no, year, title,
 		       COALESCE(doi, ''), article_url, COALESCE(abstract_id, ''),
 		       COALESCE(abstract_en, ''), language, keywords_json,
-		       license_status, COALESCE(license_url, ''), source,
+		       license_status, COALESCE(license_url, ''),
+		       oa_status, license_type, source,
 		       is_complete, provenance
 		FROM articles WHERE journal_id = ? ORDER BY record_id`, journalID)
 	if err != nil {
@@ -153,7 +214,7 @@ func (s *Store) Articles(journalID int64) ([]ArticleRow, error) {
 		if err := rows.Scan(&a.JournalID, &a.RecordID, &vol, &iss, &yr,
 			&a.Title, &a.DOI, &a.ArticleURL, &a.AbstractID, &a.AbstractEN,
 			&a.Language, &a.KeywordsJSON, &a.LicenseStatus, &a.LicenseURL,
-			&a.Source, &comp, &a.Provenance); err != nil {
+			&a.OAStatus, &a.LicenseType, &a.Source, &comp, &a.Provenance); err != nil {
 			return nil, err
 		}
 		a.VolumeNo, a.IssueNo, a.Year = vol.Int64, iss.Int64, yr.Int64
